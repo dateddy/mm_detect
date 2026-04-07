@@ -1,0 +1,29 @@
+# Base configuration for Multimodal Misinformation Detection project
+
+# Project metadata
+project_name: "Vietnamese Ads Misinformation Detection"
+version: "1.0.0"
+description: "Multimodal deep learning for fake ad detection"
+
+# Random seed for reproducibility
+seed: 42
+
+# Data configuration
+data:
+  raw_csv: "data/raw/ads_vietnam_clean.csv"
+  image_dir: "data/raw/ad_images"
+  processed_dir: "data/processed"
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+
+# Device
+device: "cuda"  # or "cpu"
+num_workers: 4
+
+# Logging
+logging:
+  level: "INFO"
+  save_dir: "experiments"
+  checkpoint_dir: "experiments/checkpoints"
+  log_freq: 100  # log every N steps

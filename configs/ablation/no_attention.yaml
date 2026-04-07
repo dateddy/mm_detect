@@ -1,0 +1,64 @@
+# Ablation: Remove cross-attention mechanism
+
+model_name: "ablation_no_attention"
+description: "Ablation study: multimodal without cross-attention"
+
+# Inherit from multimodal base, but disable attention
+# (This config would be merged with multimodal.yaml at runtime)
+
+# Text encoder
+text_encoder:
+  type: "phobert"
+  pretrained: "vinai/phobert-base"
+  output_dim: 768
+  freeze: false
+  dropout: 0.1
+
+# Image encoder
+image_encoder:
+  type: "vit"
+  pretrained: "google/vit-base-patch16-224"
+  output_dim: 768
+  freeze: false
+  dropout: 0.1
+
+# Metadata encoder
+metadata_encoder:
+  input_dim: 32
+  hidden_dim: 128
+  output_dim: 768
+  dropout: 0.2
+  num_layers: 2
+
+# Shared projection layer
+projection:
+  input_dim: 768
+  output_dim: 256
+  dropout: 0.3
+
+# Cross-attention - DISABLED FOR ABLATION
+cross_attention:
+  enabled: false
+
+# Modality dropout
+modality_dropout:
+  enabled: true
+  text_drop_prob: 0.1
+  image_drop_prob: 0.1
+  metadata_drop_prob: 0.2
+
+# Gating fusion
+gating_fusion:
+  enabled: true
+  input_dim: 256
+  num_gating_mlp_layers: 2
+
+# Residual connections
+residual:
+  enabled: true
+
+# Classification head
+classification_head:
+  hidden_dim: 128
+  output_dim: 1
+  dropout: 0.3

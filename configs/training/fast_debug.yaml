@@ -1,0 +1,40 @@
+# Fast debug configuration for quick iteration and testing
+
+training:
+  # Optimization
+  optimizer: "adam"
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  
+  # Scheduling
+  scheduler: "none"
+  
+  # Batch and epochs - REDUCED FOR DEBUGGING
+  batch_size: 64
+  num_epochs: 3
+  
+  # Checkpointing
+  save_freq: 1
+  save_top_k: 1
+  
+  # Early stopping - DISABLED
+  early_stopping:
+    enabled: false
+  
+  # Loss function
+  loss_fn: "bcewithlogits"
+  
+  # Gradient clipping
+  grad_clip: 1.0
+  
+  # Data augmentation - DISABLED
+  augmentation:
+    enabled: false
+  
+  # Reproducibility
+  deterministic: true
+
+# Validation
+validation:
+  eval_freq: 1
+  metrics: ["accuracy", "f1"]  # only essential metrics

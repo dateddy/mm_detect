@@ -1,0 +1,48 @@
+# Metadata-only model configuration (ablation: only metadata)
+
+model_name: "metadata_only"
+description: "Baseline: only metadata (numerical features)"
+
+# Text encoder - DISABLED
+text_encoder:
+  enabled: false
+
+# Image encoder - DISABLED
+image_encoder:
+  enabled: false
+
+# Metadata encoder
+metadata_encoder:
+  input_dim: 32
+  hidden_dim: 128
+  output_dim: 768
+  dropout: 0.2
+  num_layers: 2
+
+# Shared projection layer
+projection:
+  input_dim: 768
+  output_dim: 256
+  dropout: 0.3
+
+# Cross-attention - DISABLED
+cross_attention:
+  enabled: false
+
+# Modality dropout - DISABLED
+modality_dropout:
+  enabled: false
+
+# Gating fusion - DISABLED
+gating_fusion:
+  enabled: false
+
+# Residual connections
+residual:
+  enabled: true
+
+# Classification head
+classification_head:
+  hidden_dim: 128
+  output_dim: 1
+  dropout: 0.3

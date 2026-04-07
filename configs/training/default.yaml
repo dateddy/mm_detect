@@ -1,0 +1,47 @@
+# Default training configuration
+
+training:
+  # Optimization
+  optimizer: "adam"
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  
+  # Scheduling
+  scheduler: "cosine"  # "cosine", "linear", "exponential", or "none"
+  warmup_epochs: 2
+  
+  # Batch and epochs
+  batch_size: 32
+  num_epochs: 30
+  
+  # Checkpointing
+  save_freq: 1  # save every N epochs
+  save_top_k: 3  # keep top 3 checkpoints
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 5
+    metric: "val_f1"  # metric to monitor
+    mode: "max"  # "max" or "min"
+  
+  # Loss function
+  loss_fn: "bcewithlogits"  # or "focal"
+  focal_loss:
+    alpha: 0.25
+    gamma: 2.0
+  
+  # Gradient clipping
+  grad_clip: 1.0
+  
+  # Data augmentation
+  augmentation:
+    enabled: true
+  
+  # Reproducibility
+  deterministic: true
+
+# Validation
+validation:
+  eval_freq: 1  # evaluate every N epochs
+  metrics: ["accuracy", "precision", "recall", "f1", "roc_auc"]

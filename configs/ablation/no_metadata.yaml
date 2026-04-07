@@ -1,0 +1,60 @@
+# Ablation: Remove metadata modality (text + image only)
+
+model_name: "ablation_no_metadata"
+description: "Ablation study: multimodal without metadata"
+
+# Text encoder
+text_encoder:
+  type: "phobert"
+  pretrained: "vinai/phobert-base"
+  output_dim: 768
+  freeze: false
+  dropout: 0.1
+
+# Image encoder
+image_encoder:
+  type: "vit"
+  pretrained: "google/vit-base-patch16-224"
+  output_dim: 768
+  freeze: false
+  dropout: 0.1
+
+# Metadata encoder - DISABLED FOR ABLATION
+metadata_encoder:
+  enabled: false
+
+# Shared projection layer
+projection:
+  input_dim: 768
+  output_dim: 256
+  dropout: 0.3
+
+# Cross-attention
+cross_attention:
+  num_heads: 8
+  d_model: 256
+  d_ff: 1024
+  dropout: 0.3
+
+# Modality dropout
+modality_dropout:
+  enabled: true
+  text_drop_prob: 0.1
+  image_drop_prob: 0.1
+  metadata_drop_prob: 0.2  # ignored since metadata disabled
+
+# Gating fusion
+gating_fusion:
+  enabled: true
+  input_dim: 256
+  num_gating_mlp_layers: 2
+
+# Residual connections
+residual:
+  enabled: true
+
+# Classification head
+classification_head:
+  hidden_dim: 128
+  output_dim: 1
+  dropout: 0.3

@@ -1,0 +1,48 @@
+# Text-only model configuration (ablation: only text modality)
+
+model_name: "text_only"
+description: "Baseline: only text modality"
+
+# Text encoder
+text_encoder:
+  type: "phobert"
+  pretrained: "vinai/phobert-base"
+  output_dim: 768
+  freeze: false
+  dropout: 0.1
+
+# Image encoder - DISABLED
+image_encoder:
+  enabled: false
+
+# Metadata encoder - DISABLED
+metadata_encoder:
+  enabled: false
+
+# Shared projection layer
+projection:
+  input_dim: 768
+  output_dim: 256
+  dropout: 0.3
+
+# Cross-attention - DISABLED
+cross_attention:
+  enabled: false
+
+# Modality dropout - DISABLED
+modality_dropout:
+  enabled: false
+
+# Gating fusion - DISABLED
+gating_fusion:
+  enabled: false
+
+# Residual connections
+residual:
+  enabled: true
+
+# Classification head
+classification_head:
+  hidden_dim: 128
+  output_dim: 1
+  dropout: 0.3
