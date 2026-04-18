@@ -1,10 +1,8 @@
-# File: c:\Users\Vivobook\Documents\mm_detect\requirements.txt
-
 # ==================== Core Deep Learning Framework ====================
 # PyTorch and computer vision backends for neural network training
-torch==2.1.0
-torchvision==0.16.0
-torchaudio==2.1.0
+torch==2.2.0
+torchvision==0.17.0
+torchaudio==2.2.0
 
 # ==================== NLP & Model Transformers ====================
 # Pre-trained transformer models (PhoBERT, ViT) and tokenization
