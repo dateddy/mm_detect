@@ -1,0 +1,11 @@
+# Ablation Study: Loss Function Variants
+# This config removes the contrastive (InfoNCE) component to test BCE-only loss
+# Inherit all other settings from base.yaml
+
+# Ablate contrastive loss by setting lambda=0.0
+loss:
+  contrastive_lambda: 0.0
+  contrastive_temperature: 0.07
+
+# Note: When contrastive_lambda=0.0, only BCEWithLogitsLoss is used
+# This allows measuring the contribution of contrastive alignment objective

@@ -1,29 +1,107 @@
-# Base configuration for Multimodal Misinformation Detection project
+# Multimodal Misinformation Detection - Base Configuration
+# This is the primary configuration file for the project.
+# All paths are relative to the project root unless specified as absolute.
 
-# Project metadata
-project_name: "Vietnamese Ads Misinformation Detection"
-version: "1.0.0"
-description: "Multimodal deep learning for fake ad detection"
+# ============================================================================
+# Paths
+# ============================================================================
+paths:
+  data_dir: data
+  raw_csv: data/raw/ads_vietnam_clean.csv
+  images_dir: data/raw/ad_images
+  processed_dir: data/processed
+  embeddings_dir: data/embeddings
+  output_dir: outputs
+  checkpoint_dir: experiments
+  log_dir: outputs/logs
 
-# Random seed for reproducibility
-seed: 42
+# ============================================================================
+# Encoders
+# ============================================================================
+encoders:
+  text_encoder_name: vinai/phobert-base-v2
+  image_encoder_name: vit_base_patch16_224
+  image_size: 224
+  max_text_len: 256
 
-# Data configuration
+# ============================================================================
+# Model Architecture
+# ============================================================================
+model:
+  proj_dim: 256
+  num_attn_heads: 8
+  attn_dropout: 0.1
+  modality_dropout_p: 0.15
+  head_dropout: 0.3
+
+# ============================================================================
+# Training
+# ============================================================================
+training:
+  batch_size: 32
+  max_epochs: 30
+  freeze_encoder_epochs: 3
+  unfreeze_top_k_blocks: 4
+  lr_fusion: 3.0e-4
+  lr_encoders: 1.0e-5
+  weight_decay: 0.01
+  warmup_steps: 500
+  lr_min: 1.0e-7
+  gradient_clip: 1.0
+  mixed_precision: true
+  early_stopping_patience: 5
+  early_stopping_metric: macro_f1
+
+# ============================================================================
+# Loss
+# ============================================================================
+loss:
+  contrastive_lambda: 0.1
+  contrastive_temperature: 0.07
+
+# ============================================================================
+# Data
+# ============================================================================
 data:
-  raw_csv: "data/raw/ads_vietnam_clean.csv"
-  image_dir: "data/raw/ad_images"
-  processed_dir: "data/processed"
-  train_split: 0.7
-  val_split: 0.15
-  test_split: 0.15
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  random_seed: 42
 
-# Device
-device: "cuda"  # or "cpu"
-num_workers: 4
+# ============================================================================
+# Text Cleaning
+# ============================================================================
+text:
+  # Columns to apply clean_text() to in preprocessing.py
+  # Operations: lowercase, remove URLs, remove HTML tags,
+  # remove @mentions, remove #hashtags, normalize whitespace
+  columns:
+    - ad_creative_bodies
+    - ad_creative_link_titles
 
-# Logging
-logging:
-  level: "INFO"
-  save_dir: "experiments"
-  checkpoint_dir: "experiments/checkpoints"
-  log_freq: 100  # log every N steps
+# ============================================================================
+# Metadata Features
+# ============================================================================
+# 18 features total: 9 original behavioral + 9 new engineered features
+# Note: Only numeric features listed here for RobustScaler
+metadata_features:
+  # Original 9 behavioral features
+  - ads_per_page
+  - platform_count
+  - FB_only_flag
+  - all_targeted
+  - burstiness
+  - avg_ad_duration
+  - launch_delay
+  - num_countries
+  - language_location_mismatch
+  
+  # New numeric engineered features (text-based, time-based, page-based, spend-based)
+  - emoji_count                 # Count of total emojis (0-N) - NUMERIC
+  - text_length                 # Character length of ad creative body - NUMERIC
+  - ads_duration                # Duration of ad campaign in days - NUMERIC
+  - repeated_text_ratio         # Proportion of repeated ad text per page (template scams) - NUMERIC
+
+
+  # Note: emojis_in_text is a string field (concatenated emojis) and is NOT scaled,
+  # but is computed during feature engineering and available in datasets

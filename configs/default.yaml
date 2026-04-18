@@ -1,0 +1,43 @@
+# Model configuration
+model:
+  hidden_dim: 256
+  num_heads: 8
+  attention_dropout: 0.1
+  modality_dropout_rate: 0.15
+  head_dropout: 0.3
+
+# Training configuration
+training:
+  num_epochs: 10  # Total
+  phase1_epochs: 3
+  phase2_epochs: 7
+  batch_size: 32
+  gradient_clip_norm: 1.0
+  use_amp: true
+  early_stopping_patience: 5
+  log_freq: 10
+
+# Optimizer configuration
+optimizer:
+  type: 'adamw'
+  lr_phase1: 0.0003
+  lr_phase2_encoder: 0.00001
+  lr_phase2_head: 0.0003
+  weight_decay: 0.01
+
+# Loss configuration
+loss:
+  use_class_weights: true
+  contrastive_weight: 0.1
+  contrastive_temperature: 0.07
+
+# Data configuration
+data:
+  data_dir: 'data'
+  raw_dir: 'data/raw'
+  processed_dir: 'data/processed'
+  embeddings_dir: 'data/embeddings'
+  train_size: 0.7
+  val_size: 0.15
+  test_size: 0.15
+  num_workers: 4

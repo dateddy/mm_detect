@@ -1,0 +1,18 @@
+# Ablation Study: Modality Variants
+# This config removes the metadata encoder to study text+image-only fusion
+# Inherit all other settings from base.yaml
+
+# Remove metadata features to test text+image only
+metadata_features: []
+
+# Training may require different hyperparameters without metadata
+training:
+  batch_size: 32
+  max_epochs: 30
+  freeze_encoder_epochs: 3
+  unfreeze_top_k_blocks: 4
+  lr_fusion: 3.0e-4
+  lr_encoders: 1.0e-5
+  weight_decay: 0.01
+  early_stopping_patience: 5
+  early_stopping_metric: macro_f1

@@ -1,0 +1,16 @@
+# Ablation Study: Remove Metadata Features
+# This config ablates the behavioral metadata encoder entirely
+# Train on text+image modalities only
+# Inherit all other settings from base.yaml
+
+# Remove all metadata features to test text+image only performance
+metadata_features: []
+
+# To fully disable metadata encoder in implementation, set model dimensions
+# This forces the model to rely entirely on text and image modalities
+model:
+  proj_dim: 256
+  num_attn_heads: 8
+  attn_dropout: 0.1
+  modality_dropout_p: 0.15
+  head_dropout: 0.3

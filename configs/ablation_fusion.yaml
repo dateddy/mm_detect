@@ -1,0 +1,14 @@
+# Ablation Study: Fusion Component Variants
+# This config disables cross-attention and gating to test simple concatenation baseline
+# Inherit all other settings from base.yaml
+
+# Disable cross-attention by setting num_attn_heads to 0 and dropout to 1.0 (effectively disabling)
+model:
+  proj_dim: 256
+  num_attn_heads: 0
+  attn_dropout: 0.0
+  modality_dropout_p: 0.15
+  head_dropout: 0.3
+
+# Note: In implementation, when num_attn_heads=0, fusion falls back to simple concatenation
+# This allows us to measure the contribution of cross-attention and gating mechanisms

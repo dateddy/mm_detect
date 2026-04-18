@@ -1,0 +1,22 @@
+# Ablation Study: Fine-tuning Strategy Variants
+# This config extends the freeze period and studies different unfreezing schedules
+# Inherit all other settings from base.yaml
+
+# Extend Phase 1 (frozen encoders) to 5 epochs and reduce Phase 2 encoder LR
+training:
+  batch_size: 32
+  max_epochs: 30
+  freeze_encoder_epochs: 5  # Longer frozen phase
+  unfreeze_top_k_blocks: 4
+  lr_fusion: 3.0e-4
+  lr_encoders: 5.0e-6  # Even lower encoder LR during fine-tuning
+  weight_decay: 0.01
+  warmup_steps: 500
+  lr_min: 1.0e-7
+  gradient_clip: 1.0
+  mixed_precision: true
+  early_stopping_patience: 5
+  early_stopping_metric: macro_f1
+
+# Note: This variant tests if longer pre-training of fusion+head before
+# fine-tuning encoders leads to better convergence and generalization
