@@ -1,89 +1,99 @@
-"""Metadata encoder for categorical and numerical features"""
+"""Metadata encoder for 9 behavioral features"""
 
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 
 class MetadataEncoder(nn.Module):
     """
-    Metadata encoder for categorical and numerical features.
+    Metadata encoder for 9 engineered behavioral features.
     
-    Combines embeddings from categorical features with normalized
-    numerical features into a single representation.
+    Architecture: 9 → 256 → 256 → 256 with BatchNorm and GELU activation.
+    Output: 256-dimensional embedding.
+    
+    Features (all numeric after preprocessing):
+    - ads_per_page (RobustScaled)
+    - platform_count (RobustScaled)
+    - FB_only_flag (binary 0/1)
+    - all_targeted (binary 0/1)
+    - burstiness (RobustScaled)
+    - avg_ad_duration (RobustScaled)
+    - launch_delay (RobustScaled)
+    - num_countries (RobustScaled)
+    - language_location_mismatch (binary 0/1)
     """
     
     def __init__(
         self,
-        categorical_features: Dict[str, int],
-        embedding_dim: int = 16,
-        numerical_features: int = 5,
-        output_dim: int = 768,
-        hidden_dim: int = 256
+        num_features: int = 9,
+        hidden_dims: Optional[list[int]] = None,
+        output_dim: int = 256,
+        dropout: float = 0.0,
+        use_batch_norm: bool = True,
+        activation: str = "gelu"
     ):
         """
         Initialize metadata encoder.
         
         Args:
-            categorical_features: Dict mapping feature names to vocab sizes
-            embedding_dim: Embedding dimension for categorical features
-            numerical_features: Number of numerical features
-            output_dim: Output embedding dimension (768 to match text/image)
-            hidden_dim: Hidden dimension for MLP
+            num_features: Number of input features (9)
+            hidden_dims: Hidden layer dimensions, default [256, 256]
+            output_dim: Output dimension (256)
+            dropout: Dropout rate
+            use_batch_norm: Whether to use batch normalization
+            activation: Activation function ("gelu", "relu", etc.)
         """
         super().__init__()
         
-        self.categorical_features = categorical_features
-        self.embedding_dim = embedding_dim
-        self.numerical_features = numerical_features
+        if hidden_dims is None:
+            hidden_dims = [256, 256]
         
-        # Embedding layers for categorical features
-        self.embeddings = nn.ModuleDict()
-        for feat_name, vocab_size in categorical_features.items():
-            self.embeddings[feat_name] = nn.Embedding(vocab_size, embedding_dim)
+        self.num_features = num_features
+        self.output_dim = output_dim
+        self.use_batch_norm = use_batch_norm
         
-        # Calculate input dimension
-        cat_dim = len(categorical_features) * embedding_dim
-        input_dim = cat_dim + numerical_features
+        # Activation function
+        if activation == "gelu":
+            act_fn = nn.GELU()
+        elif activation == "relu":
+            act_fn = nn.ReLU()
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
         
-        # MLP projection to output dimension
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, output_dim)
-        )
+        # Build MLP: 9 → 256 → 256 → 256
+        layers = []
+        
+        # First layer: 9 → first hidden dim
+        layers.append(nn.Linear(num_features, hidden_dims[0]))
+        if use_batch_norm:
+            layers.append(nn.BatchNorm1d(hidden_dims[0]))
+        layers.append(act_fn)
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        
+        # Middle layers
+        for i in range(len(hidden_dims) - 1):
+            layers.append(nn.Linear(hidden_dims[i], hidden_dims[i + 1]))
+            if use_batch_norm:
+                layers.append(nn.BatchNorm1d(hidden_dims[i + 1]))
+            layers.append(act_fn)
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+        
+        # Final output layer: last hidden dim → output dim
+        layers.append(nn.Linear(hidden_dims[-1], output_dim))
+        
+        self.mlp = nn.Sequential(*layers)
     
-    def forward(
-        self,
-        categorical_data: Dict[str, torch.Tensor],
-        numerical_data: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, metadata: torch.Tensor) -> torch.Tensor:
         """
         Encode metadata to embeddings.
         
         Args:
-            categorical_data: Dict mapping feature names to LongTensors
-            numerical_data: Tensor of shape (batch_size, num_numerical_features)
+            metadata: Metadata tensor (batch_size, 9)
             
         Returns:
-            Embeddings (batch_size, 768)
+            Embeddings (batch_size, 256)
         """
-        # Embed categorical features
-        embedded_features = []
-        for feat_name in self.categorical_features.keys():
-            if feat_name in categorical_data:
-                embedded = self.embeddings[feat_name](categorical_data[feat_name])
-                embedded_features.append(embedded)
-        
-        # Concatenate embeddings and numerical features
-        combined = torch.cat(embedded_features + [numerical_data], dim=1)
-        
-        # Project to output dimension
-        output = self.mlp(combined)
-        
-        return output
-    
-    @property
-    def output_dim(self) -> int:
-        return 768
+        return self.mlp(metadata)

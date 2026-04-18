@@ -1,33 +1,41 @@
-"""Random seed utilities for reproducibility"""
+# src/utils/seed.py
+"""Reproducibility utilities for setting random seeds across all sources."""
 
+import os
 import random
+
 import numpy as np
 import torch
 
 
-def set_seed(seed: int = 42, deterministic: bool = True) -> None:
+def set_seed(seed: int) -> None:
     """
-    Set random seed for reproducibility across all libraries.
-    
+    Set random seed for reproducibility across all sources.
+
+    Sets seeds for:
+    - Python's random module
+    - NumPy
+    - PyTorch CPU and CUDA operations
+    - cuDNN for deterministic behavior
+    - PYTHONHASHSEED environment variable
+
     Args:
-        seed: Random seed value
-        deterministic: Whether to enable deterministic mode (can impact performance)
+        seed: Seed value to use.
     """
-    # Python random
+    # Set Python built-in random seed
     random.seed(seed)
-    
-    # NumPy random
+
+    # Set NumPy random seed
     np.random.seed(seed)
-    
-    # PyTorch random
+
+    # Set PyTorch seeds
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    
-    # Deterministic mode (may reduce performance)
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    else:
-        torch.backends.cudnn.benchmark = True
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # Set cuDNN to deterministic mode
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # Set PYTHONHASHSEED environment variable
+    os.environ["PYTHONHASHSEED"] = str(seed)
