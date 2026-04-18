@@ -1,100 +1,230 @@
-"""Model evaluation script"""
+#!/usr/bin/env python3
+"""Evaluate model on a test set and save metrics."""
 
 import argparse
+import json
+import logging
 import sys
 from pathlib import Path
-import torch
-import numpy as np
 
+import numpy as np
+import torch
+import yaml
+
+# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.utils.logger import setup_logger
-from src.models.multimodal_model import MultimodalModel
-from src.data.dataset import MultimodalDataset
-from src.evaluation.evaluator import Evaluator
+from src.data.collate import collate_fn
+from src.data.dataset import create_datasets
+from src.evaluation.metrics import (
+    compute_all_metrics,
+    find_best_threshold,
+    print_classification_report,
+)
+from src.models.full_model import MultimodalMisinfoDetector
+from src.utils.checkpoint import load_checkpoint
+from src.utils.logger import get_logger
+from src.utils.seed import set_seed
 from torch.utils.data import DataLoader
 
-
-def main(args):
-    logger = setup_logger('evaluate', log_file=Path('logs/evaluate.log'))
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info(f'Using device: {device}')
-    
-    # Load embeddings
-    logger.info('Loading embeddings...')
-    embeddings_dir = Path(args.embeddings_dir)
-    text_emb = np.load(embeddings_dir / 'text' / 'all_embeddings.npy')
-    image_emb = np.load(embeddings_dir / 'image' / 'all_embeddings.npy')
-    metadata_emb = np.load(embeddings_dir / 'metadata' / 'all_features.npy')
-    
-    # Load labels and splits
-    id_mapping = np.load(embeddings_dir / 'id_mapping.npy', allow_pickle=True).item()
-    test_indices = id_mapping['test_indices']
-    labels = torch.from_numpy(id_mapping['labels']).float()
-    
-    # Create test dataset
-    test_dataset = MultimodalDataset(
-        test_indices,
-        torch.from_numpy(text_emb).float(),
-        torch.from_numpy(image_emb).float(),
-        torch.from_numpy(metadata_emb).float(),
-        labels
+def main():
+    """Load model, run inference on split, compute metrics."""
+    parser = argparse.ArgumentParser(
+        description='Evaluate multimodal misinformation detector'
     )
-    
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=False
+    parser.add_argument(
+        '--config',
+        type=str,
+        required=True,
+        help='Path to config YAML/JSON'
     )
-    
-    # Load model
-    logger.info('Loading model...')
-    model = MultimodalModel()
-    checkpoint = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(checkpoint['model_state'])
-    model.to(device)
-    
-    # Evaluate
-    logger.info('Evaluating...')
-    evaluator = Evaluator(model, device)
-    results = evaluator.evaluate(
-        test_loader,
-        threshold=0.5,
-        output_dir=Path(args.output_dir)
-    )
-    
-    # Print results
-    logger.info('\nResults:')
-    for metric, value in results['metrics'].items():
-        logger.info(f'{metric}: {value:.4f}')
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Evaluate model')
     parser.add_argument(
         '--checkpoint',
         type=str,
         required=True,
-        help='Model checkpoint path'
+        help='Path to model checkpoint'
     )
     parser.add_argument(
-        '--embeddings-dir',
+        '--split',
         type=str,
-        default='data/embeddings',
-        help='Embeddings directory'
+        default='test',
+        choices=['train', 'val', 'test'],
+        help='Dataset split to evaluate'
     )
     parser.add_argument(
-        '--output-dir',
+        '--threshold',
         type=str,
-        default='outputs/evaluation',
-        help='Output directory'
+        default='0.5',
+        help='Classification threshold (float or "auto" for val-based tuning)'
     )
     parser.add_argument(
         '--batch-size',
         type=int,
         default=32,
-        help='Batch size'
+        help='Batch size for inference'
     )
-    
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=42,
+        help='Random seed'
+    )
+
     args = parser.parse_args()
-    main(args)
+
+    # Setup
+    set_seed(args.seed)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logger = get_logger(__name__)
+    logger.info(f'Device: {device}')
+
+    # Load config
+    config_path = Path(args.config)
+    if config_path.suffix == '.json':
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    else:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+    logger.info(f'Config loaded from {config_path}')
+
+    # Create output directory for results
+    output_dir = Path('outputs/results')
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine threshold strategy
+    use_auto_threshold = args.threshold.lower() == 'auto'
+    if use_auto_threshold:
+        threshold = None  # Will be computed from val set
+        logger.info('Threshold = auto (will be determined from validation set)')
+    else:
+        threshold = float(args.threshold)
+        logger.info(f'Threshold = {threshold}')
+
+    # Load model
+    logger.info(f'Loading model from {args.checkpoint}')
+    model = MultimodalMisinfoDetector(config)
+    state_dict, _ = load_checkpoint(args.checkpoint)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    logger.info('Model loaded and set to eval mode')
+
+    # Create datasets
+    logger.info('Creating datasets...')
+    datasets = create_datasets(config)
+    eval_dataset = datasets[args.split]
+    logger.info(f'Eval dataset: {len(eval_dataset)} samples from split "{args.split}"')
+
+    # If auto threshold, load validation set for threshold search
+    if use_auto_threshold:
+        logger.info('Loading validation set for threshold auto-tuning...')
+        val_dataset = datasets['val']
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=2
+        )
+
+        # Inference on validation set
+        logger.info('Running inference on validation set...')
+        y_true_val = []
+        y_pred_proba_val = []
+
+        with torch.no_grad():
+            for batch in val_loader:
+                # Move batch to device
+                for key in batch:
+                    if isinstance(batch[key], torch.Tensor):
+                        batch[key] = batch[key].to(device)
+
+                logits = model(batch)
+                proba = torch.sigmoid(logits).cpu().numpy().flatten()
+                labels = batch['labels'].cpu().numpy()
+
+                y_pred_proba_val.extend(proba)
+                y_true_val.extend(labels)
+
+        y_true_val = np.array(y_true_val)
+        y_pred_proba_val = np.array(y_pred_proba_val)
+
+        # Find best threshold on validation set
+        logger.info('Finding best threshold on validation set...')
+        threshold = find_best_threshold(y_true_val, y_pred_proba_val, metric='f1_macro')
+        logger.info(f'Auto-tuned threshold: {threshold:.4f}')
+
+    # Create eval dataloader
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=2
+    )
+
+    # Inference on eval split
+    logger.info(f'Running inference on {args.split} set...')
+    y_true = []
+    y_pred_proba = []
+
+    with torch.no_grad():
+        for batch in eval_loader:
+            # Move batch to device
+            for key in batch:
+                if isinstance(batch[key], torch.Tensor):
+                    batch[key] = batch[key].to(device)
+
+            logits = model(batch)
+            proba = torch.sigmoid(logits).cpu().numpy().flatten()
+            labels = batch['labels'].cpu().numpy()
+
+            y_pred_proba.extend(proba)
+            y_true.extend(labels)
+
+    y_true = np.array(y_true)
+    y_pred_proba = np.array(y_pred_proba)
+    logger.info(f'Inference complete: {len(y_true)} samples')
+
+    # Compute metrics
+    logger.info(f'Computing metrics with threshold={threshold:.4f}')
+    metrics = compute_all_metrics(y_true, y_pred_proba, threshold)
+
+    # Print results
+    logger.info('\n' + '=' * 60)
+    logger.info(f'Evaluation Results ({args.split} split)')
+    logger.info('=' * 60)
+    logger.info(f"Accuracy:  {metrics['accuracy']:.4f}")
+    logger.info(f"Precision: {metrics['precision']:.4f}")
+    logger.info(f"Recall:    {metrics['recall']:.4f}")
+    logger.info(f"F1 Score (binary): {metrics['f1_binary']:.4f}")
+    logger.info(f"F1 Score (macro):  {metrics['f1_macro']:.4f}")
+    logger.info(f"AUC-ROC:   {metrics['auc_roc']:.4f}")
+    logger.info(f"AUC-PR:    {metrics['auc_pr']:.4f}")
+    logger.info('=' * 60)
+
+    # Print classification report
+    y_pred = (y_pred_proba >= threshold).astype(int)
+    print_classification_report(
+        y_true,
+        y_pred,
+        label_names=['Not Misleading', 'Misleading']
+    )
+
+    # Save metrics to JSON
+    results = {
+        'split': args.split,
+        'threshold': threshold,
+        'metrics': metrics,
+        'checkpoint': str(args.checkpoint),
+    }
+
+    output_path = output_dir / f'eval_{args.split}.json'
+    with open(output_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    logger.info(f'\nResults saved to {output_path}')
+
+
+if __name__ == '__main__':
+    main()
