@@ -26,31 +26,31 @@ using text (PhoBERT), images (ViT-B/16), and behavioral metadata with advanced f
     python_requires=">=3.10",
     install_requires=[
         # Core deep learning
-        "torch==2.1.0",
-        "torchvision==0.16.0",
-        "torchaudio==2.1.0",
+        "torch",
+        "torchvision",
+        "torchaudio",
         # NLP & transformers
-        "transformers==4.33.2",
-        "timm==0.9.7",
+        "transformers",
+        "timm",
         # Data processing
-        "pandas==2.0.3",
-        "numpy==1.24.3",
-        "scipy==1.11.2",
-        "scikit-learn==1.3.0",
+        "pandas",
+        "numpy",
+        "scipy",
+        "scikit-learn",
         # Image processing
-        "Pillow==10.0.0",
+        "Pillow",
         # Configuration
-        "pyyaml==6.0",
-        "omegaconf==2.3.1",
-        "python-dotenv==1.0.0",
+        "pyyaml",
+        "omegaconf",
+        "python-dotenv>=1.0.0",
         # Visualization
-        "matplotlib==3.8.0",
-        "seaborn==0.13.0",
+        "matplotlib",
+        "seaborn",
         # Utilities
-        "tqdm==4.66.1",
+        "tqdm",
         # Monitoring
-        "tensorboard==2.13.0",
-        "wandb==0.15.11",
+        "tensorboard",
+        "wandb>=0.15.11",
     ],
     extras_require={
         "dev": [

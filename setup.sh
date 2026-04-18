@@ -1,0 +1,6 @@
+#!/bin/bash
+python -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
