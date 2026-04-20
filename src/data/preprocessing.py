@@ -58,8 +58,9 @@ def split_by_page(
     ).astype(int)
 
     # Get unique page_ids with their majority labels
-    page_ids = page_labels.index.values
-    page_majority_labels = page_labels.values
+    # Convert to numpy to handle PyArrow arrays from pandas
+    page_ids = page_labels.index.to_numpy()
+    page_majority_labels = page_labels.to_numpy()
 
     # First split: train + temp (val + test)
     test_ratio = 1.0 - train_ratio - val_ratio
