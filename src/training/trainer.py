@@ -1160,11 +1160,14 @@ class Trainer:
             f"ROC-AUC: {metrics['auc_roc']:.4f}"
         )
         return metrics
-    def train(self) -> None:
+    def train(self) -> str:
         """
         Main training loop with two-phase protocol.
         Phase 1: Encoders frozen, train fusion + head
         Phase 2: Unfreeze top-k blocks, train all with differential LRs
+        
+        Returns:
+            Path to best checkpoint
         """
         num_epochs = self.config["training"]["max_epochs"]
         freeze_epochs = self.config["training"]["freeze_encoder_epochs"]
@@ -1246,6 +1249,7 @@ class Trainer:
         self.logger.info("=" * 70)
         self.logger.info("Training complete!")
         self.logger.info("=" * 70)
+        return best_ckpt_path
     def _move_batch_to_device(self, batch: dict) -> dict:
         """
         Move batch tensors to device, handling mixed types (tensors, lists, etc.).

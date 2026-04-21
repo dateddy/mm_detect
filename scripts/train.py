@@ -81,6 +81,13 @@ def parse_args():
         action="store_true",
         help="Run only 2 batches per epoch for 2 epochs to verify pipeline",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        choices=["cpu", "cuda"],
+        help="Device to use for training (default: cuda if available, else cpu)",
+    )
     return parser.parse_args()
 
 
@@ -160,7 +167,10 @@ def main():
     logger.info(f"Config saved to {config_save_path}")
 
     # ========== 6. Setup device ==========
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device:
+        device = torch.device(args.device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device}")
 
     # ========== 7. Load data ==========
@@ -225,8 +235,9 @@ def main():
     train_csv_path = processed_dir / "splits" / "train.csv"
     train_df = pd.read_csv(train_csv_path)
     class_weights_list = compute_class_weights(train_df)
-    class_weights = class_weights_list.to(device)
-    logger.info(f"Class weights: {class_weights.cpu().numpy()}")
+    # Keep class_weights on CPU initially for loss function initialization
+    class_weights = class_weights_list
+    logger.info(f"Class weights: {class_weights.numpy()}")
 
     # ========== 9. Create dataloaders ==========
     from src.data.collate import collate_fn
@@ -331,11 +342,12 @@ def main():
     logger.info("=" * 80)
 
     logger.info("Loading best checkpoint...")
-    from src.utils.checkpoint import load_checkpoint
-
-    state_dict, _ = load_checkpoint(best_checkpoint_path)
-    model.load_state_dict(state_dict)
-    model.to(device)
+    # The trainer has already loaded the best checkpoint into the model
+    if best_checkpoint_path is None:
+        logger.warning("No best checkpoint found. Using current model state.")
+    else:
+        logger.info(f"Using checkpoint: {best_checkpoint_path}")
+    
     model.eval()
 
     # Run inference on test set
@@ -352,9 +364,16 @@ def main():
                 if isinstance(batch[key], torch.Tensor):
                     batch[key] = batch[key].to(device)
 
-            logits = model(batch)
+            outputs = model(batch)
+            
+            # Handle both dict and direct tensor outputs
+            if isinstance(outputs, dict):
+                logits = outputs["logits"].squeeze(-1)  # (B, 1) -> (B,)
+            else:
+                logits = outputs.squeeze(-1)  # (B, 1) -> (B,)
+            
             proba = torch.sigmoid(logits).cpu().numpy().flatten()
-            labels = batch["labels"].cpu().numpy()
+            labels = batch["label"].cpu().numpy()
 
             test_preds.extend(proba)
             test_labels.extend(labels)
@@ -381,9 +400,16 @@ def main():
                 if isinstance(batch[key], torch.Tensor):
                     batch[key] = batch[key].to(device)
 
-            logits = model(batch)
+            outputs = model(batch)
+            
+            # Handle both dict and direct tensor outputs
+            if isinstance(outputs, dict):
+                logits = outputs["logits"].squeeze(-1)  # (B, 1) -> (B,)
+            else:
+                logits = outputs.squeeze(-1)  # (B, 1) -> (B,)
+            
             proba = torch.sigmoid(logits).cpu().numpy().flatten()
-            labels = batch["labels"].cpu().numpy()
+            labels = batch["label"].cpu().numpy()
 
             val_preds.extend(proba)
             val_labels.extend(labels)
