@@ -726,9 +726,9 @@ def prepare_data_split_comprehensive(raw_csv_path: str, output_dir: str,
     val_path = splits_dir / "val.csv"
     test_path = splits_dir / "test.csv"
     
-    train_df.to_csv(train_path, index=False)
-    val_df.to_csv(val_path, index=False)
-    test_df.to_csv(test_path, index=False)
+    train_df.to_csv(train_path, index=False, float_format='%.0f')
+    val_df.to_csv(val_path, index=False, float_format='%.0f')
+    test_df.to_csv(test_path, index=False, float_format='%.0f')
     
     logger.info(f"\n  ✓ Train split: {train_path} ({len(train_df)} rows, {len(train_df.columns)} columns)")
     logger.info(f"  ✓ Val split: {val_path} ({len(val_df)} rows, {len(val_df.columns)} columns)")

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.data.dataset import create_datasets
 from src.data.preprocessing import compute_class_weights
 from src.losses.combined_loss import CombinedLoss
-from src.models.full_model import MultimodalMisinfoDetector
+from src.models.full_model import MultimodalMisinfoDetector, model_summary 
 from src.training.trainer import Trainer
 from src.utils.logger import get_logger
 from src.utils.seed import set_seed
@@ -287,9 +287,9 @@ def main():
 
     # Log model summary
     try:
-        model_summary = model.model_summary()
+        summary = model_summary(model)
         logger.info("Model summary:")
-        logger.info("\n" + model_summary)
+        logger.info("\n" + summary)
     except Exception as e:
         logger.warning(f"Could not generate model summary: {e}")
 
@@ -299,8 +299,9 @@ def main():
         class_weights=class_weights,
         contrastive_lambda=config["loss"].get("contrastive_lambda", 0.1),
         temperature=config["loss"].get("contrastive_temperature", 0.07),
+        label_smoothing=config["loss"].get("label_smoothing", 0.0),
     )
-    logger.info(f"Loss: CombinedLoss with pos_weight={class_weights[0].item():.4f}")
+    logger.info(f"Loss: CombinedLoss with pos_weight={class_weights[0].item():.4f}, label_smoothing={config['loss'].get('label_smoothing', 0.0)}")
 
     # ========== 13. Resume from checkpoint if specified ==========
     start_epoch = 0
@@ -325,6 +326,7 @@ def main():
         val_loader=val_loader,
         loss_fn=loss_fn,
         device=device,
+        experiment_name=experiment_name,
         logger_obj=logger,
     )
     logger.info("Trainer initialized")
@@ -333,26 +335,71 @@ def main():
     logger.info("=" * 80)
     logger.info("STARTING TRAINING")
     logger.info("=" * 80)
-    best_checkpoint_path = trainer.train()
-    logger.info(f"Best checkpoint: {best_checkpoint_path}")
+    trainer.train()
 
     # ========== 16. Evaluate on test set ==========
+    # Verify trainer recorded a best checkpoint
+    if trainer.best_checkpoint_path is None:
+        raise RuntimeError(
+            "Trainer ended without recording a best checkpoint. "
+            "Check that early_stopping_metric matches a key in val_metrics dict."
+        )
+
     logger.info("=" * 80)
     logger.info("EVALUATING ON TEST SET")
     logger.info("=" * 80)
+    logger.info(f"Loading best checkpoint: {trainer.best_checkpoint_path}")
+    logger.info(f"Best val metric:         {trainer.best_metric:.4f} "
+                f"(epoch {trainer.best_epoch})")
 
-    logger.info("Loading best checkpoint...")
-    # The trainer has already loaded the best checkpoint into the model
-    if best_checkpoint_path is None:
-        logger.warning("No best checkpoint found. Using current model state.")
-    else:
-        logger.info(f"Using checkpoint: {best_checkpoint_path}")
-    
+    # Load best checkpoint into model (trainer already did this, but ensure consistency)
+    from src.utils.checkpoint import load_checkpoint
+    load_checkpoint(trainer.best_checkpoint_path, trainer.model)
     model.eval()
+
+    # Find best threshold on validation set
+    logger.info("Finding best threshold on validation set...")
+    import numpy as np
+
+    val_labels = []
+    val_preds = []
+
+    with torch.no_grad():
+        for batch in val_loader:
+            for key in batch:
+                if isinstance(batch[key], torch.Tensor):
+                    batch[key] = batch[key].to(device)
+
+            outputs = model(batch)
+            
+            # Handle both dict and direct tensor outputs
+            if isinstance(outputs, dict):
+                logits = outputs["logits"].squeeze(-1)  # (B, 1) -> (B,)
+            else:
+                logits = outputs.squeeze(-1)  # (B, 1) -> (B,)
+            
+            proba = torch.sigmoid(logits).cpu().numpy().flatten()
+            labels = batch["label"].cpu().numpy()
+
+            val_preds.extend(proba)
+            val_labels.extend(labels)
+
+    val_labels = np.array(val_labels)
+    val_preds = np.array(val_preds)
+
+    # Compute metrics
+    from src.evaluation.metrics import (
+        compute_all_metrics,
+        find_best_threshold,
+        print_classification_report,
+        log_metrics_to_file,
+    )
+
+    best_threshold = find_best_threshold(val_labels, val_preds, metric="f1_macro")
+    logger.info(f"Best threshold (from val): {best_threshold:.4f}")
 
     # Run inference on test set
     logger.info("Running inference on test set...")
-    import numpy as np
 
     test_labels = []
     test_preds = []
@@ -381,47 +428,8 @@ def main():
     test_labels = np.array(test_labels)
     test_preds = np.array(test_preds)
 
-    # Compute metrics
-    from src.evaluation.metrics import (
-        compute_all_metrics,
-        find_best_threshold,
-        print_classification_report,
-        log_metrics_to_file,
-    )
-
-    # Find best threshold on validation set
-    logger.info("Finding best threshold on validation set...")
-    val_labels = []
-    val_preds = []
-
-    with torch.no_grad():
-        for batch in val_loader:
-            for key in batch:
-                if isinstance(batch[key], torch.Tensor):
-                    batch[key] = batch[key].to(device)
-
-            outputs = model(batch)
-            
-            # Handle both dict and direct tensor outputs
-            if isinstance(outputs, dict):
-                logits = outputs["logits"].squeeze(-1)  # (B, 1) -> (B,)
-            else:
-                logits = outputs.squeeze(-1)  # (B, 1) -> (B,)
-            
-            proba = torch.sigmoid(logits).cpu().numpy().flatten()
-            labels = batch["label"].cpu().numpy()
-
-            val_preds.extend(proba)
-            val_labels.extend(labels)
-
-    val_labels = np.array(val_labels)
-    val_preds = np.array(val_preds)
-
-    threshold = find_best_threshold(val_labels, val_preds, metric="f1_macro")
-    logger.info(f"Best threshold: {threshold:.4f}")
-
-    # Compute test metrics
-    test_metrics = compute_all_metrics(test_labels, test_preds, threshold)
+    # Compute test metrics using best threshold from validation
+    test_metrics = compute_all_metrics(test_labels, test_preds, best_threshold)
 
     logger.info("=" * 80)
     logger.info("TEST SET RESULTS")
@@ -435,7 +443,7 @@ def main():
     logger.info(f"AUC-PR:    {test_metrics['auc_pr']:.4f}")
 
     # Print classification report
-    test_binary = (test_preds >= threshold).astype(int)
+    test_binary = (test_preds >= best_threshold).astype(int)
     print_classification_report(
         test_labels,
         test_binary,
@@ -443,7 +451,7 @@ def main():
     )
 
     # Save test metrics
-    test_metrics["threshold"] = threshold
+    test_metrics["threshold"] = best_threshold
     test_metrics_path = results_dir / "test_metrics.json"
     with open(test_metrics_path, "w") as f:
         json.dump(test_metrics, f, indent=2)
@@ -461,8 +469,11 @@ def main():
     logger.info("=" * 80)
     logger.info(f"Experiment: {experiment_name}")
     logger.info(f"Results dir: {results_dir}")
-    logger.info(f"Best checkpoint: {best_checkpoint_path}")
+    logger.info(f"Best checkpoint: {trainer.best_checkpoint_path}")
+    logger.info(f"Best epoch: {trainer.best_epoch}")
+    logger.info(f"Best val metric: {trainer.best_metric:.4f}")
     logger.info(f"Test F1 (macro): {test_metrics['f1_macro']:.4f}")
+    logger.info(f"Test AUC-ROC: {test_metrics['auc_roc']:.4f}")
 
     print("\n" + "=" * 80)
     print("TRAINING COMPLETE")

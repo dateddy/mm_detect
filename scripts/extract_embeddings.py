@@ -109,6 +109,7 @@ def extract_embeddings(config: dict, split: str, batch_size: int = 32):
     all_sample_ids = []
 
     logger.info(f"Extracting embeddings for {split} split...")
+    batch_count = 0
     with torch.no_grad():
         for batch in tqdm(dataloader, desc=f"Extracting {split}"):
             # Check if batch is in online mode (has input_ids, pixel_values)
@@ -129,6 +130,13 @@ def extract_embeddings(config: dict, split: str, batch_size: int = 32):
             all_text_emb.append(text_emb.cpu().numpy())
             all_image_emb.append(image_emb.cpu().numpy())
             all_sample_ids.extend(batch["sample_id"])
+            
+            # Diagnostic: check first few batches
+            if batch_count < 2:
+                logger.info(f"  Batch {batch_count}: {len(batch['sample_id'])} samples")
+                logger.info(f"    Text emb: shape={text_emb.shape}, sample 0 norm={torch.norm(text_emb[0]).item():.4f}, sample 1 norm={torch.norm(text_emb[min(1, len(text_emb)-1)]).item():.4f}")
+                logger.info(f"    Image emb: shape={image_emb.shape}, sample 0 norm={torch.norm(image_emb[0]).item():.4f}, sample 1 norm={torch.norm(image_emb[min(1, len(image_emb)-1)]).item():.4f}")
+            batch_count += 1
 
     # Concatenate all embeddings
     text_emb_np = np.concatenate(all_text_emb, axis=0)  # (N, 768)
@@ -228,4 +236,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
