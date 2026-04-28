@@ -21,62 +21,96 @@ class InfoNCELoss(nn.Module):
     then averages.
 
     Attributes:
-        temperature: Temperature parameter for scaled similarity (default: 0.07).
+        temperature: Temperature parameter for scaled similarity (default: 0.1).
     """
 
-    def __init__(self, temperature: float = 0.07):
+    def __init__(self, temperature: float = 0.1):
         """
         Initialize InfoNCELoss.
 
         Args:
-            temperature: Temperature for scaled similarity (default: 0.07).
+            temperature: Temperature for scaled similarity (default: 0.1).
                         Larger values soften the softmax; smaller values sharpen it.
+                        Use 0.07 for sharp loss; 0.1+ for stable early training.
         """
         super().__init__()
         self.temperature = temperature
         logger.info(f"Initialized InfoNCELoss (temperature={temperature})")
 
     def forward(
-        self, text_emb: torch.Tensor, image_emb: torch.Tensor
+        self,
+        text_emb: torch.Tensor,
+        image_emb: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Compute InfoNCE loss between text and image embeddings.
 
-        Args:
-            text_emb: Text embeddings, shape (batch_size, embedding_dim).
-            image_emb: Image embeddings, shape (batch_size, embedding_dim).
+        Parameters
+        ----------
+        text_emb : torch.Tensor
+            Text embeddings (projected), shape (batch_size, embedding_dim).
+            Must have requires_grad=True for loss to be trainable.
+        image_emb : torch.Tensor
+            Image embeddings (projected), shape (batch_size, embedding_dim).
+            Must have requires_grad=True for loss to be trainable.
+        valid_mask : torch.Tensor | None
+            Boolean mask of shape (batch_size,) where True indicates valid samples.
+            Used to exclude samples where image modality was dropped by ModalityDropout.
+            If None, all samples are treated as valid.
 
-        Returns:
-            Scalar loss tensor.
+        Returns
+        -------
+        torch.Tensor
+            Scalar loss tensor with requires_grad=True for training.
         """
-        batch_size = text_emb.shape[0]
+        # 1. Filter to valid samples only (exclude modality-dropout zeroed images)
+        if valid_mask is not None:
+            valid = valid_mask.bool()
+            text_emb = text_emb[valid]
+            image_emb = image_emb[valid]
 
-        # Handle batch size of 1 (no contrastive pairs possible)
-        if batch_size == 1:
+        B = text_emb.shape[0]
+
+        # 2. Handle degenerate batch
+        if B <= 1:
             logger.debug("Batch size is 1, returning zero loss for contrastive term")
-            return torch.tensor(0.0, device=text_emb.device, dtype=text_emb.dtype)
+            return torch.tensor(
+                0.0, device=text_emb.device, dtype=text_emb.dtype, requires_grad=True
+            )
 
-        # L2 normalize embeddings
-        text_emb = F.normalize(text_emb, p=2, dim=-1)  # (B, D)
-        image_emb = F.normalize(image_emb, p=2, dim=-1)  # (B, D)
+        # 3. Verify gradients are attached — fail loudly if not
+        if not text_emb.requires_grad and not image_emb.requires_grad:
+            raise RuntimeError(
+                "InfoNCELoss received inputs with no gradient. "
+                "Check for .detach() calls on t_proj/i_proj in full_model.py "
+                "or trainer.py before the loss computation."
+            )
 
-        # Compute cosine similarity matrix
-        # Shape: (B, B) where similarity[i, j] = text_i · image_j
-        similarity = torch.matmul(text_emb, image_emb.t()) / self.temperature
+        # 4. L2 normalize — MANDATORY before cosine similarity
+        text_norm = F.normalize(text_emb, dim=-1, eps=1e-8)
+        image_norm = F.normalize(image_emb, dim=-1, eps=1e-8)
 
-        # Labels: diagonal elements are positive pairs
-        labels = torch.arange(batch_size, device=text_emb.device)
+        # 5. Verify normalization succeeded (no NaN from zero vectors)
+        if torch.isnan(text_norm).any() or torch.isnan(image_norm).any():
+            raise RuntimeError(
+                "NaN after L2 normalization in InfoNCELoss. "
+                "Embeddings contain zero vectors. Check projection layer "
+                "initialization and verify encoders produce non-zero output."
+            )
 
-        # Direction 1: Text queries Image embeddings
-        # Loss over each row (text perspective)
-        loss_text_to_image = F.cross_entropy(similarity, labels)
+        # 6. Full similarity matrix (B, B), scaled by temperature
+        sim = torch.matmul(text_norm, image_norm.T) / self.temperature
 
-        # Direction 2: Image queries Text embeddings
-        # Loss over each column (image perspective)
-        # Equivalent to transposing the similarity matrix
-        loss_image_to_text = F.cross_entropy(similarity.t(), labels)
+        # 7. Symmetric cross-entropy
+        labels = torch.arange(B, device=sim.device)
+        loss_t2i = F.cross_entropy(sim, labels)
+        loss_i2t = F.cross_entropy(sim.T, labels)
 
-        # Average both directions
-        loss = (loss_text_to_image + loss_image_to_text) / 2.0
+        loss = (loss_t2i + loss_i2t) / 2.0
+
+        # Verify loss is valid
+        assert not torch.isnan(loss), "Loss computation resulted in NaN"
+        assert loss.requires_grad, "Loss has no gradient for backpropagation"
 
         return loss

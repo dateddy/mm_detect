@@ -91,7 +91,7 @@ class MultimodalMisinfoDetector(nn.Module):
         self.num_metadata_features = num_metadata_features
         if num_metadata_features > 0:
             self.metadata_encoder = MetadataEncoder(
-                input_dim=num_metadata_features, hidden_dim=proj_dim
+                input_dim=num_metadata_features, output_dim=proj_dim
             )
         else:
             self.metadata_encoder = None
@@ -152,11 +152,11 @@ class MultimodalMisinfoDetector(nn.Module):
         Returns:
             Dictionary with:
             - 'logits': (B, 1) classification logits
-            - 't_proj': (B, 256) text embeddings after projection
-            - 'i_proj': (B, 256) image embeddings after projection
-            - 'm_proj': (B, 256) metadata embeddings after projection
+            - 't_proj': (B, 256) text embeddings after projection — NO detach, gradient attached
+            - 'i_proj': (B, 256) image embeddings after projection — NO detach, gradient attached
             - 't_prime': (B, 256) text after cross-attention
             - 'i_prime': (B, 256) image after cross-attention
+            - 'image_valid': (B,) bool — True where image was NOT dropped by modality dropout
         """
         device = next(self.parameters()).device
 
@@ -172,6 +172,29 @@ class MultimodalMisinfoDetector(nn.Module):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             pixel_values = batch["pixel_values"].to(device)
+
+            # === DIAGNOSTIC: Check if pixel_values are suspiciously zero ===
+            if self.training and not getattr(self, "_first_batch_checked", False):
+                pv_sum = pixel_values.abs().sum().item()
+                pv_std = pixel_values.std().item()
+                
+                if pv_sum == 0:
+                    raise RuntimeError(
+                        "ALL pixel_values in this batch are zero. "
+                        "Either every image is missing or image loading is broken. "
+                        "Run `python scripts/diagnose_image_loading.py --config configs/base.yaml` "
+                        "to diagnose the root cause."
+                    )
+                
+                if pv_std < 1e-4:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"⚠ Suspiciously low pixel_values std: {pv_std:.6f}. "
+                        f"Check image normalization, transforms, or data loading pipeline."
+                    )
+                
+                self._first_batch_checked = True
 
             # Encode text and image
             text_emb = self.text_encoder(input_ids, attention_mask)  # (B, 768)
@@ -189,8 +212,9 @@ class MultimodalMisinfoDetector(nn.Module):
             m_raw = torch.zeros(batch_size, self.proj_dim, device=device, dtype=torch.float32)
 
         # Project all modalities to common dimension
-        t_proj = self.text_proj(text_emb)  # (B, 256)
-        i_proj = self.image_proj(image_emb)  # (B, 256)
+        # CRITICAL: Do NOT detach here — gradients must flow back through projections
+        t_proj = self.text_proj(text_emb)  # (B, 256) with requires_grad=True
+        i_proj = self.image_proj(image_emb)  # (B, 256) with requires_grad=True
         m_proj = self.meta_proj(m_raw)  # (B, 256)
 
         # Zero-mask missing images AFTER projection
@@ -199,8 +223,10 @@ class MultimodalMisinfoDetector(nn.Module):
         )  # (B,)
         i_proj[missing_image_mask] = 0.0  # Zero out missing image embeddings
 
-        # Apply modality dropout
-        t_proj, i_proj, m_proj = self.modality_dropout(t_proj, i_proj, m_proj)
+        # Apply modality dropout — returns BOTH masked embeddings AND validity masks
+        (t_proj, i_proj, m_proj), (t_valid, i_valid, m_valid) = self.modality_dropout(
+            t_proj, i_proj, m_proj
+        )
 
         # Dual cross-attention
         t_prime, i_prime = self.dual_cross_attn(t_proj, i_proj, m_proj)
@@ -215,9 +241,9 @@ class MultimodalMisinfoDetector(nn.Module):
             "logits": logits,
             "t_proj": t_proj,
             "i_proj": i_proj,
-            "m_proj": m_proj,
             "t_prime": t_prime,
             "i_prime": i_prime,
+            "image_valid": i_valid,  # Used by contrastive loss to exclude dropped images
         }
 
     def unfreeze_encoders(self, top_k: int) -> None:

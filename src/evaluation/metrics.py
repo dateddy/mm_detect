@@ -45,6 +45,12 @@ def compute_all_metrics(
         - auc_pr: Area under Precision-Recall curve
         - threshold: Decision threshold used
     """
+    # === DEFENSIVE CHECK: Verify y_pred_proba is in [0, 1] ===
+    assert y_pred_proba.min() >= 0.0 and y_pred_proba.max() <= 1.0, (
+        f"y_pred_proba must be in [0,1]. Got min={y_pred_proba.min():.6f}, max={y_pred_proba.max():.6f}. "
+        f"Did you forget to apply sigmoid to logits?"
+    )
+    
     # Convert probabilities to binary predictions
     y_pred = (y_pred_proba >= threshold).astype(int)
 
@@ -59,6 +65,16 @@ def compute_all_metrics(
     auc_roc = roc_auc_score(y_true, y_pred_proba)
     precision_curve, recall_curve, _ = precision_recall_curve(y_true, y_pred_proba)
     auc_pr = auc(recall_curve, precision_curve)
+    
+    # === DIAGNOSTIC: Detect label inversion automatically ===
+    if auc_roc < 0.3:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"⚠ AUC-ROC = {auc_roc:.4f} is significantly below 0.5. "
+            f"This suggests label inversion or systematically wrong predictions. "
+            f"Check: (a) y_true is correct, (b) y_pred_proba is sigmoid(logit) not 1-sigmoid(logit), "
+            f"(c) labels weren't inverted in preprocessing."
+        )
 
     return {
         "accuracy": float(accuracy),

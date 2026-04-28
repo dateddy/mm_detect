@@ -60,14 +60,14 @@ class ModalityProjection(nn.Module):
 
 class ModalityDropout(nn.Module):
     """
-    Per-modality dropout that zeroes entire embedding vectors.
+    Per-modality dropout that zeroes entire embedding vectors and tracks validity.
 
     During training, randomly masks complete embeddings along the batch dimension
     with probability p. Unlike standard dropout which zeros individual dimensions,
     this zeros entire (B, embed_dim) vectors for missing or unreliable modalities.
 
-    Handles missing modalities gracefully: if an embedding is already all-zeros
-    (indicating a missing modality), it is not re-zeroed.
+    Returns BOTH masked embeddings AND boolean masks indicating which samples
+    were NOT dropped. This allows the contrastive loss to exclude dropped samples.
 
     Attributes:
         p: Dropout probability (default: 0.15).
@@ -86,46 +86,55 @@ class ModalityDropout(nn.Module):
 
     def forward(self, *embeddings: torch.Tensor) -> tuple:
         """
-        Apply dropout masks to embeddings.
+        Apply dropout masks to embeddings and return validity masks.
 
         During training: independently zero each embedding vector with probability p.
-        During eval: return embeddings unchanged.
+        During eval: return embeddings unchanged with all-True masks.
 
         Args:
             *embeddings: Variable number of embedding tensors, each shape (batch_size, embed_dim).
 
         Returns:
-            Tuple of masked embeddings, same shapes as inputs.
+            Tuple of two tuples:
+            - Masked embeddings (same structure as inputs)
+            - Validity masks: (B,) bool tensors where True = not dropped, False = dropped
         """
         if not self.training or self.p == 0.0:
-            return embeddings
+            # Eval mode: return embeddings unchanged with all-True masks
+            masks = tuple(
+                torch.ones(emb.shape[0], dtype=torch.bool, device=emb.device)
+                if emb is not None
+                else None
+                for emb in embeddings
+            )
+            return embeddings, masks
 
-        masked_embeddings = []
+        results, masks = [], []
 
         for emb in embeddings:
             if emb is None:
-                masked_embeddings.append(emb)
+                results.append(emb)
+                masks.append(None)
                 continue
 
             batch_size = emb.shape[0]
             device = emb.device
 
-            # Create Bernoulli mask of shape (B, 1)
-            # 1 = keep, 0 = drop
-            mask = torch.bernoulli(
-                torch.full((batch_size, 1), 1.0 - self.p, device=device)
-            )
+            # Create Bernoulli mask: 1 = keep, 0 = drop
+            bernoulli = torch.bernoulli(
+                torch.full((batch_size,), 1.0 - self.p, device=device)
+            ).bool()
 
             # Check if embedding is already all-zeros (missing modality)
-            # If so, don't re-zero it
-            is_missing = (emb == 0).all(dim=1, keepdim=True).float()
+            already_zero = (emb.abs().sum(dim=-1) == 0).bool()
 
-            # Apply mask only to non-missing embeddings
-            effective_mask = mask * (1.0 - is_missing) + is_missing
+            # Keep: not dropped AND not already zero
+            keep = bernoulli & ~already_zero
 
             # Apply mask: (B, 1) broadcasts over (B, D)
-            masked_emb = emb * effective_mask
+            masked_emb = emb * keep.float().unsqueeze(-1)
 
-            masked_embeddings.append(masked_emb)
+            results.append(masked_emb)
+            masks.append(keep)
 
-        return tuple(masked_embeddings)
+        return tuple(results), tuple(masks)

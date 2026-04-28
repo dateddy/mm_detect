@@ -69,6 +69,27 @@ class AdDataset(Dataset):
         self.use_offline_embeddings = False
         self.text_embeddings = None
         self.image_embeddings = None
+        
+        # Warning counter for missing images (log first 10 per epoch)
+        self._missing_warning_count = 0
+
+        # Assert that images directory exists and contains files
+        if not self.images_dir.exists():
+            raise FileNotFoundError(
+                f"Images directory does not exist: {self.images_dir.resolve()}"
+            )
+        
+        image_files = list(self.images_dir.glob("*.*"))
+        if len(image_files) == 0:
+            raise FileNotFoundError(
+                f"No image files found in {self.images_dir.resolve()}. "
+                f"Check the path in configs/base.yaml → paths.images_dir"
+            )
+
+        logger.info(
+            f"AdDataset[{split}]: images_dir={self.images_dir.resolve()} "
+            f"contains {len(image_files)} image files"
+        )
 
         # Attempt to load pre-extracted embeddings if provided
         if offline_embeddings_dir:
@@ -83,17 +104,23 @@ class AdDataset(Dataset):
         """
         Attempt to load pre-extracted embeddings from directory.
 
-        Expected naming convention:
-        - {split}_text_embeddings.npy (shape N x 768)
-        - {split}_image_embeddings.npy (shape N x 768)
+        Tries multiple naming conventions:
+        1. Standard: {split}_text_embeddings.npy, {split}_image_embeddings.npy
+        2. Alternative: phobert_{split}.npy, vit_{split}.npy
 
         Args:
             offline_embeddings_dir: Directory containing embedding files.
         """
         emb_dir = Path(offline_embeddings_dir)
 
+        # Try standard naming first
         text_emb_path = emb_dir / f"{self.split}_text_embeddings.npy"
         image_emb_path = emb_dir / f"{self.split}_image_embeddings.npy"
+
+        # If standard naming not found, try alternative naming
+        if not text_emb_path.exists() or not image_emb_path.exists():
+            text_emb_path = emb_dir / f"phobert_{self.split}.npy"
+            image_emb_path = emb_dir / f"vit_{self.split}.npy"
 
         try:
             if text_emb_path.exists() and image_emb_path.exists():
@@ -121,13 +148,13 @@ class AdDataset(Dataset):
 
                 self.use_offline_embeddings = True
                 logger.info(
-                    f"Loaded offline embeddings: text {self.text_embeddings.shape}, "
-                    f"image {self.image_embeddings.shape}"
+                    f"Loaded offline embeddings from {text_emb_path.name}, {image_emb_path.name}: "
+                    f"text {self.text_embeddings.shape}, image {self.image_embeddings.shape}"
                 )
             else:
                 logger.debug(
-                    f"Embedding files not found in {emb_dir} "
-                    f"(looking for {self.split}_*.npy). Using online mode."
+                    f"Embedding files not found in {emb_dir}. Using online mode. "
+                    f"(looked for {self.split}_*.npy and phobert/vit_{self.split}.npy)"
                 )
         except Exception as e:
             logger.warning(f"Failed to load offline embeddings: {e}. Using online mode.")
@@ -154,7 +181,8 @@ class AdDataset(Dataset):
             - 'sample_id': Sample identifier string
         """
         row = self.df.iloc[idx]
-        sample_id = str(row.get("ad_id", idx))
+        # Use 'id' column from the CSV (not 'ad_id')
+        sample_id = str(row.get("id", idx))
         missing_image = False
 
         if self.use_offline_embeddings:
@@ -213,34 +241,52 @@ class AdDataset(Dataset):
         """
         Load and transform image for sample.
 
+        Tries multiple file extensions (.png, .jpg, .jpeg, .webp) before giving up.
+        Logs warnings (first 10 per epoch) when images are missing.
+
         Args:
             idx: Sample index.
 
         Returns:
-            Transformed image tensor (3, 224, 224) or None if image not found.
+            Transformed image tensor (3, 224, 224) or None if image not found after
+            trying all extensions.
         """
         row = self.df.iloc[idx]
-        ad_id = str(row.get("ad_id", idx))
+        # Use 'id' column from the CSV (not 'ad_id')
+        sample_id = str(row.get("id", idx))
 
-        # Try multiple possible image path patterns
-        possible_paths = [
-            self.images_dir / f"{ad_id}.png",
-            self.images_dir / f"{ad_id}.jpg",
-            self.images_dir / f"{ad_id}.jpeg",
-        ]
+        # Try multiple file extensions
+        extensions = [".png", ".jpg", ".jpeg", ".webp"]
+        image_path = None
 
-        for image_path in possible_paths:
-            if image_path.exists():
-                try:
-                    image = Image.open(image_path).convert("RGB")
-                    pixel_values = self.image_transform(image)
-                    return pixel_values
-                except Exception as e:
-                    logger.warning(f"Failed to load image {image_path}: {e}")
-                    return None
+        for ext in extensions:
+            candidate = self.images_dir / f"{sample_id}{ext}"
+            if candidate.exists():
+                image_path = candidate
+                break
 
-        logger.debug(f"Image not found for ad_id={ad_id}")
-        return None
+        if image_path is None:
+            # Image not found after trying all extensions
+            if self._missing_warning_count < 10:
+                logger.warning(
+                    f"Image not found for sample {sample_id} "
+                    f"(tried .png/.jpg/.jpeg/.webp in {self.images_dir.resolve()}). "
+                    f"Substituting zero tensor. (Warning {self._missing_warning_count + 1}/10)"
+                )
+                self._missing_warning_count += 1
+            return None
+
+        # Image file found, try to load it
+        try:
+            image = Image.open(image_path).convert("RGB")
+            pixel_values = self.image_transform(image)
+            return pixel_values
+        except Exception as e:
+            logger.warning(
+                f"Failed to load image {image_path}: {e}. "
+                f"Substituting zero tensor."
+            )
+            return None
 
     def _get_metadata(self, idx: int) -> torch.Tensor:
         """
@@ -292,9 +338,10 @@ def create_datasets(
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset).
     """
-    train_df = pd.read_csv(train_csv)
-    val_df = pd.read_csv(val_csv)
-    test_df = pd.read_csv(test_csv)
+    # Force 'id' column to be read as string to prevent scientific notation issues
+    train_df = pd.read_csv(train_csv, dtype={"id": str})
+    val_df = pd.read_csv(val_csv, dtype={"id": str})
+    test_df = pd.read_csv(test_csv, dtype={"id": str})
 
     train_dataset = AdDataset(
         df=train_df,

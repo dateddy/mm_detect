@@ -682,6 +682,142 @@ def diagnose_leakage_postsplit(train_df: pd.DataFrame, val_df: pd.DataFrame,
     logger.info("  [4,5,7,8,9,10] Advanced checks: Implement in diagnose_leakage.py with model training and file I/O\n")
 
 
+# ============================================================================
+# RAW TEXT FEATURE EXTRACTION (must run BEFORE clean_text())
+# ============================================================================
+
+def compute_exclamation_ratio(df: pd.DataFrame) -> pd.Series:
+    """
+    Compute ratio of exclamation marks to total characters in ad_creative_bodies.
+    
+    Misinformation ads often use repeated !!! for urgency and emotional manipulation.
+    This feature must be computed on RAW text BEFORE clean_text() removes punctuation.
+    
+    Args:
+        df: DataFrame with 'ad_creative_bodies' column (raw, uncleaned text).
+    
+    Returns:
+        Series with exclamation ratio per row, filled with 0.0 for NaN/empty.
+    """
+    if "ad_creative_bodies" not in df.columns:
+        logger.warning("ad_creative_bodies column not found, returning 0s")
+        return pd.Series(0.0, index=df.index)
+    
+    def ratio(text):
+        if pd.isna(text) or not text or len(text) == 0:
+            return 0.0
+        text = str(text)
+        exclamation_count = text.count("!")
+        return exclamation_count / len(text)
+    
+    return df["ad_creative_bodies"].apply(ratio).fillna(0.0)
+
+
+def compute_caps_word_ratio(df: pd.DataFrame) -> pd.Series:
+    """
+    Compute ratio of ALL-CAPS words to total words in ad_creative_bodies.
+    
+    Vietnamese misinformation often uses all-caps words for sensationalism:
+    e.g., "GIẢM GIÁ SỐC HÔM NAY" signals urgency and emotional manipulation.
+    
+    A "caps word" is defined as:
+    - Word with length > 1 (exclude single-letter abbreviations)
+    - All alphabetic characters are uppercase
+    
+    This feature must be computed on RAW text BEFORE clean_text().
+    
+    Args:
+        df: DataFrame with 'ad_creative_bodies' column (raw, uncleaned text).
+    
+    Returns:
+        Series with caps word ratio per row, filled with 0.0 for NaN/empty.
+    """
+    if "ad_creative_bodies" not in df.columns:
+        logger.warning("ad_creative_bodies column not found, returning 0s")
+        return pd.Series(0.0, index=df.index)
+    
+    def ratio(text):
+        if pd.isna(text) or not text:
+            return 0.0
+        text = str(text)
+        words = text.split()
+        if len(words) == 0:
+            return 0.0
+        
+        caps_count = 0
+        for word in words:
+            # Remove non-alpha chars, check if remaining is uppercase
+            alpha_only = ''.join(c for c in word if c.isalpha())
+            if len(alpha_only) > 1 and alpha_only.isupper():
+                caps_count += 1
+        
+        return caps_count / len(words)
+    
+    return df["ad_creative_bodies"].apply(ratio).fillna(0.0)
+
+
+def compute_repeated_punct_count(df: pd.DataFrame) -> pd.Series:
+    """
+    Count occurrences of 2+ consecutive identical punctuation marks.
+    
+    Indicates emotional emphasis or manipulation attempts.
+    Pattern: "Thật không??" → 1 match
+             "Mua ngay!!!" → 1 match
+             "Tin sốc!!!???" → 2 matches
+    
+    This feature must be computed on RAW text BEFORE clean_text().
+    
+    Args:
+        df: DataFrame with 'ad_creative_bodies' column (raw, uncleaned text).
+    
+    Returns:
+        Series with repeated punctuation count per row, filled with 0 for NaN/empty.
+    """
+    if "ad_creative_bodies" not in df.columns:
+        logger.warning("ad_creative_bodies column not found, returning 0s")
+        return pd.Series(0, index=df.index)
+    
+    def count(text):
+        if pd.isna(text) or not text:
+            return 0
+        text = str(text)
+        # Pattern: 2+ consecutive identical punctuation marks from {!?.,-}
+        matches = re.findall(r'([!?.,-])\1+', text)
+        return len(matches)
+    
+    return df["ad_creative_bodies"].apply(count).fillna(0)
+
+
+def compute_url_count(df: pd.DataFrame) -> pd.Series:
+    """
+    Count URLs in ad_creative_bodies BEFORE they are removed by clean_text().
+    
+    Ads with multiple URLs may be link farms or redirect scams.
+    Pattern: http://, https://, and variations.
+    
+    This feature must be computed on RAW text BEFORE clean_text().
+    
+    Args:
+        df: DataFrame with 'ad_creative_bodies' column (raw, uncleaned text).
+    
+    Returns:
+        Series with URL count per row, filled with 0 for NaN/empty.
+    """
+    if "ad_creative_bodies" not in df.columns:
+        logger.warning("ad_creative_bodies column not found, returning 0s")
+        return pd.Series(0, index=df.index)
+    
+    def count(text):
+        if pd.isna(text) or not text:
+            return 0
+        text = str(text)
+        # Pattern: http:// or https:// followed by non-whitespace
+        matches = re.findall(r'https?://\S+', text)
+        return len(matches)
+    
+    return df["ad_creative_bodies"].apply(count).fillna(0)
+
+
 def engineer_all_features(df: pd.DataFrame,
                            reference_df: pd.DataFrame | None = None,
                            raw_bodies: pd.Series | None = None
@@ -704,6 +840,31 @@ def engineer_all_features(df: pd.DataFrame,
 
     df_out = df.copy()
     new_features = []
+
+    # === RAW TEXT FEATURES (must run BEFORE clean_text()) ===
+    # These features extract signals from raw uncleaned text before linguistic
+    # preprocessing. They capture stylistic misinformation markers like emotional
+    # punctuation, capitalization patterns, and URL counts.
+    logger.info("Computing raw text features (before cleaning)...")
+    if "ad_creative_bodies" in df_out.columns:
+        df_out["exclamation_ratio"] = compute_exclamation_ratio(df_out)
+        new_features.append("exclamation_ratio")
+        
+        df_out["caps_word_ratio"] = compute_caps_word_ratio(df_out)
+        new_features.append("caps_word_ratio")
+        
+        df_out["repeated_punct_count"] = compute_repeated_punct_count(df_out)
+        new_features.append("repeated_punct_count")
+        
+        df_out["url_count"] = compute_url_count(df_out)
+        new_features.append("url_count")
+        
+        logger.info(
+            f"  Raw text features: exclamation_ratio, caps_word_ratio, "
+            f"repeated_punct_count, url_count"
+        )
+    else:
+        logger.warning("ad_creative_bodies column not found, skipping raw text features")
 
     # ---- CORE METADATA FEATURES ----
     logger.info("Computing core metadata features...")
@@ -813,6 +974,214 @@ def engineer_all_features(df: pd.DataFrame,
     
     logger.info("="*80 + "\n")
 
+    return df_out
+
+
+# ============================================================================
+# ANTI-LEAKAGE FEATURE ENGINEERING FUNCTIONS
+# ============================================================================
+# These functions split the feature engineering pipeline to prevent data leakage.
+# Row features are computed on full data before splitting.
+# Page features are computed per split using train statistics as reference.
+
+def engineer_row_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Engineer only row-level features safe to compute independently.
+    
+    These features derive from a single row with no aggregation across rows.
+    Safe to compute on the full dataset before splitting.
+    
+    Features engineered:
+    - launch_delay: Days between ad creation and first delivery
+    - platform_count: Number of unique platforms
+    - FB_only_flag: Binary flag if only on Facebook
+    - all_targeted: Binary flag if all ads are targeted
+    - num_countries: Number of target countries
+    - language_location_mismatch: Language-location mismatch flag
+    - text_length: Character count of ad text
+    - emoji_count: Count of emojis
+    - exclamation_ratio: Ratio of exclamation marks
+    - caps_word_ratio: Ratio of all-caps words
+    - repeated_punct_count: Count of consecutive punctuation
+    - url_count: Count of URLs
+    
+    Args:
+        df: Raw DataFrame (text should be cleaned before calling)
+    
+    Returns:
+        DataFrame with row-level features added
+    """
+    logger.info("="*80)
+    logger.info("ENGINEERING ROW-LEVEL FEATURES (safe before split)")
+    logger.info("="*80)
+    
+    df_out = df.copy()
+    features_added = []
+    
+    # === Raw text features (must exist in original text before clean_text) ===
+    logger.info("Computing raw text features...")
+    if "ad_creative_bodies" in df_out.columns:
+        df_out["exclamation_ratio"] = compute_exclamation_ratio(df_out)
+        features_added.append("exclamation_ratio")
+        
+        df_out["caps_word_ratio"] = compute_caps_word_ratio(df_out)
+        features_added.append("caps_word_ratio")
+        
+        df_out["repeated_punct_count"] = compute_repeated_punct_count(df_out)
+        features_added.append("repeated_punct_count")
+        
+        df_out["url_count"] = compute_url_count(df_out)
+        features_added.append("url_count")
+    
+    # === Row-level metadata features ===
+    logger.info("Computing row-level metadata features...")
+    df_out["launch_delay"] = compute_launch_delay(df_out)
+    features_added.append("launch_delay")
+    
+    df_out["platform_count"] = compute_platform_count(df_out)
+    features_added.append("platform_count")
+    
+    df_out["FB_only_flag"] = compute_fb_only_flag(df_out)
+    features_added.append("FB_only_flag")
+    
+    df_out["all_targeted"] = compute_all_targeted(df_out)
+    features_added.append("all_targeted")
+    
+    df_out["num_countries"] = compute_num_countries(df_out)
+    features_added.append("num_countries")
+    
+    df_out["language_location_mismatch"] = compute_language_location_mismatch(df_out)
+    features_added.append("language_location_mismatch")
+    
+    # === Text features (on cleaned text) ===
+    logger.info("Computing text-based features...")
+    if "ad_creative_bodies" in df_out.columns:
+        df_out["emoji_count"] = df_out["ad_creative_bodies"].apply(count_emojis)
+        features_added.append("emoji_count")
+        
+        df_out["text_length"] = df_out["ad_creative_bodies"].apply(calculate_text_length)
+        features_added.append("text_length")
+    
+    logger.info(f"Row-level features added: {features_added}")
+    logger.info(f"Total: {len(features_added)} features")
+    logger.info("="*80 + "\n")
+    
+    return df_out
+
+
+def engineer_page_features(df: pd.DataFrame, reference_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Engineer only page-level features using reference_df for aggregations.
+    
+    These features aggregate across rows per page_id. ALL aggregations use
+    reference_df, never df itself. For unseen pages in df (val/test), fills
+    with reference_df median.
+    
+    Features engineered:
+    - ads_per_page: Count of ads per page_id
+    - burstiness: Temporal concentration metric per page
+    - avg_ad_duration: Average duration in hours per page
+    - ads_duration: Campaign duration in days per page
+    - repeated_text_ratio: Proportion of repeated text per page
+    
+    Args:
+        df: DataFrame for which to compute page features (train/val/test split)
+        reference_df: Reference DataFrame for computing aggregates (usually train_df)
+                     Must have same structure as df
+    
+    Returns:
+        DataFrame with page-level features added
+    """
+    logger.info(f"Engineering page-level features (df: {len(df)} rows, "
+                f"reference: {len(reference_df)} rows)")
+    
+    df_out = df.copy()
+    features_added = []
+    
+    # === Page-aggregated features using reference_df ===
+    
+    # ads_per_page: count from reference
+    if "page_id" in reference_df.columns:
+        page_counts = reference_df.groupby("page_id").size()
+        df_out["ads_per_page"] = df_out["page_id"].map(page_counts).fillna(
+            page_counts.median()
+        )
+        features_added.append("ads_per_page")
+    
+    # burstiness: temporal pattern from reference
+    df_out["burstiness"] = compute_burstiness(reference_df).groupby(
+        reference_df["page_id"]
+    ).transform("first")  # Get unique value per page, then map to df rows
+    if "page_id" in df_out.columns:
+        burstiness_by_page = (
+            reference_df.copy()
+        )
+        burstiness_by_page["_burstiness"] = compute_burstiness(reference_df)
+        burstiness_map = burstiness_by_page.groupby("page_id")["_burstiness"].first()
+        df_out["burstiness"] = df_out["page_id"].map(burstiness_map).fillna(
+            burstiness_map.median()
+        )
+    features_added.append("burstiness")
+    
+    # avg_ad_duration: average duration per page from reference
+    df_out["avg_ad_duration"] = compute_avg_ad_duration(reference_df).groupby(
+        reference_df["page_id"]
+    ).transform("first")  # Get unique value per page, then map to df rows
+    if "page_id" in df_out.columns:
+        avg_duration_by_page = reference_df.copy()
+        avg_duration_by_page["_avg_duration"] = compute_avg_ad_duration(reference_df)
+        avg_duration_map = avg_duration_by_page.groupby("page_id")["_avg_duration"].first()
+        df_out["avg_ad_duration"] = df_out["page_id"].map(avg_duration_map).fillna(
+            avg_duration_map.median()
+        )
+    features_added.append("avg_ad_duration")
+    
+    # ads_duration: campaign duration (stop - start) per page
+    if "page_id" in reference_df.columns and "ad_delivery_start_time" in reference_df.columns:
+        ref_copy = reference_df.copy()
+        if not pd.api.types.is_datetime64_any_dtype(ref_copy["ad_delivery_start_time"]):
+            ref_copy["ad_delivery_start_time"] = pd.to_datetime(
+                ref_copy["ad_delivery_start_time"], errors='coerce'
+            )
+        
+        # Campaign duration: max delivery stop - min delivery start per page
+        def compute_campaign_duration(group):
+            if "ad_delivery_stop_time" in group.columns:
+                stop_times = pd.to_datetime(group["ad_delivery_stop_time"], errors='coerce')
+                min_start = group["ad_delivery_start_time"].min()
+                max_stop = stop_times.max()
+                if pd.notna(min_start) and pd.notna(max_stop):
+                    return (max_stop - min_start).days
+            return 0
+        
+        campaign_duration_by_page = ref_copy.groupby("page_id").apply(
+            compute_campaign_duration
+        )
+        df_out["ads_duration"] = df_out["page_id"].map(campaign_duration_by_page).fillna(
+            campaign_duration_by_page.median()
+        )
+        features_added.append("ads_duration")
+    
+    # repeated_text_ratio: proportion of repeated ad text per page
+    if "page_id" in reference_df.columns and "ad_creative_bodies" in reference_df.columns:
+        def compute_repeated_ratio(group):
+            texts = group["ad_creative_bodies"].dropna().astype(str)
+            if len(texts) <= 1:
+                return 0.0
+            text_counts = texts.value_counts()
+            repeated_count = (text_counts[text_counts > 1].sum())
+            return repeated_count / len(texts) if len(texts) > 0 else 0.0
+        
+        repeated_ratio_by_page = reference_df.groupby("page_id").apply(
+            compute_repeated_ratio
+        )
+        df_out["repeated_text_ratio"] = df_out["page_id"].map(repeated_ratio_by_page).fillna(
+            repeated_ratio_by_page.median()
+        )
+        features_added.append("repeated_text_ratio")
+    
+    logger.info(f"Page-level features added: {features_added}")
+    
     return df_out
 
 
