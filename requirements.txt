@@ -38,7 +38,7 @@ tqdm==4.66.1
 # ==================== Monitoring & Experiment Tracking ====================
 # Logging and tracking training experiments
 tensorboard==2.13.0
-wandb==0.15.11
+wandb>=0.16.0
 
 # ==================== Development & Testing ====================
 # Code quality, formatting, and testing tools
