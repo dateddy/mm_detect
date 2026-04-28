@@ -28,6 +28,8 @@ encoders:
 # Model Architecture
 # ============================================================================
 model:
+  metadata_input_dim: 17               # number of metadata features (must match len(metadata_features))
+  metadata_hidden_dims: [64, 128, 256] # gradual expansion: 17 → 64 → 128 → 256
   proj_dim: 256
   num_attn_heads: 8
   attn_dropout: 0.1
@@ -43,21 +45,23 @@ training:
   freeze_encoder_epochs: 3
   unfreeze_top_k_blocks: 4
   lr_fusion: 3.0e-4
-  lr_encoders: 1.0e-5
+  lr_encoders: 3.0e-6
   weight_decay: 0.01
-  warmup_steps: 500
+  warmup_steps: 800
   lr_min: 1.0e-7
   gradient_clip: 1.0
   mixed_precision: true
-  early_stopping_patience: 5
-  early_stopping_metric: macro_f1
+  early_stopping_patience: 8
+  early_stopping_metric: f1_macro
+  early_stopping_ema_alpha: 0.7
 
 # ============================================================================
 # Loss
 # ============================================================================
 loss:
   contrastive_lambda: 0.1
-  contrastive_temperature: 0.07
+  contrastive_temperature: 0.1
+  label_smoothing: 0.05
 
 # ============================================================================
 # Data
@@ -82,7 +86,7 @@ text:
 # ============================================================================
 # Metadata Features
 # ============================================================================
-# 18 features total: 9 original behavioral + 9 new engineered features
+# 22 features total: 9 original behavioral + 4 text-based + 4 raw text + 1 time + more
 # Note: Only numeric features listed here for RobustScaler
 metadata_features:
   # Original 9 behavioral features
@@ -102,6 +106,11 @@ metadata_features:
   - ads_duration                # Duration of ad campaign in days - NUMERIC
   - repeated_text_ratio         # Proportion of repeated ad text per page (template scams) - NUMERIC
 
+  # Raw text features (computed BEFORE clean_text() is applied)
+  - exclamation_ratio           # Ratio of !!! to text length (emotional urgency signal) - NUMERIC
+  - caps_word_ratio             # Ratio of ALL-CAPS words to total words (sensationalism) - NUMERIC
+  - repeated_punct_count        # Count of 2+ consecutive punctuation marks (emphasis) - NUMERIC
+  - url_count                   # Number of URLs in raw text (link farm indicator) - NUMERIC
 
   # Note: emojis_in_text is a string field (concatenated emojis) and is NOT scaled,
   # but is computed during feature engineering and available in datasets
