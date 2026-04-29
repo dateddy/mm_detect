@@ -14,6 +14,7 @@ paths:
   output_dir: outputs
   checkpoint_dir: experiments
   log_dir: outputs/logs
+  metadata_scaler: data/processed/metadata_scaler.joblib  # Path to fitted scaler artifact
 
 # ============================================================================
 # Encoders
@@ -30,7 +31,7 @@ encoders:
 model:
   metadata_input_dim: 17               # number of metadata features (must match len(metadata_features))
   metadata_hidden_dims: [64, 128, 256] # gradual expansion: 17 → 64 → 128 → 256
-  proj_dim: 256
+  proj_dim: 512
   num_attn_heads: 8
   attn_dropout: 0.1
   modality_dropout_p: 0.15
@@ -45,9 +46,9 @@ training:
   freeze_encoder_epochs: 3
   unfreeze_top_k_blocks: 4
   lr_fusion: 3.0e-4
-  lr_encoders: 3.0e-6
+  lr_encoders: 3.0e-5
   weight_decay: 0.01
-  warmup_steps: 800
+  warmup_steps: 400
   lr_min: 1.0e-7
   gradient_clip: 1.0
   mixed_precision: true
@@ -60,8 +61,20 @@ training:
 # ============================================================================
 loss:
   contrastive_lambda: 0.1
-  contrastive_temperature: 0.1
-  label_smoothing: 0.05
+  contrastive_temperature_init: 0.07  # CLIP-style learnable temperature (was: fixed 0.1)
+  label_smoothing: 0.05               # only used with cls_loss_type: bce
+  
+  # Classification loss type (NEW in FIX 4)
+  cls_loss_type: bce                  # "bce" | "focal" | "asymmetric_focal"
+  
+  # Focal Loss parameters (used when cls_loss_type in {focal, asymmetric_focal})
+  focal_alpha: 0.5                    # 0.5 = balanced, > 0.5 emphasizes positive class (recall)
+  focal_gamma: 2.0                    # standard Focal Loss focusing parameter
+  
+  # Asymmetric Focal Loss parameters (used when cls_loss_type = asymmetric_focal)
+  focal_gamma_pos: 1.0                # lower γ for positives = more gradient when missed FN
+  focal_gamma_neg: 4.0                # higher γ for negatives = down-weight easy negatives (FP)
+  focal_clip: 0.05                    # probability shift to help very confident negatives
 
 # ============================================================================
 # Data
