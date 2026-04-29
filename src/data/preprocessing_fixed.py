@@ -28,6 +28,261 @@ logger = logging.getLogger(__name__)
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
+# ============================================================================
+# Metadata Feature Scaling Configuration
+# ============================================================================
+# Specify feature types based on domain knowledge for per-feature scaling
+METADATA_FEATURE_TYPES = {
+    # Binary features (no scaling needed - already in [0, 1])
+    "FB_only_flag": "binary",
+    "all_targeted": "binary",
+    "language_location_mismatch": "binary",
+
+    # Bounded ratios in [0, 1] (no scaling needed - already comparable)
+    "repeated_text_ratio": "ratio",
+    "exclamation_ratio": "ratio",
+    "caps_word_ratio": "ratio",
+
+    # Heavy-tailed counts (log1p transform, then RobustScaler)
+    "ads_per_page": "log_robust",
+    "text_length": "log_robust",
+    "burstiness": "log_robust",
+    "launch_delay": "log_robust",
+    "ads_duration": "log_robust",
+    "avg_ad_duration": "log_robust",
+
+    # Discrete counts with moderate range (RobustScaler)
+    "num_countries": "robust",
+    "platform_count": "robust",
+    "emoji_count": "robust",
+    "repeated_punct_count": "robust",
+    "url_count": "robust",
+}
+
+
+# ============================================================================
+# MetadataScaler Class
+# ============================================================================
+class MetadataScaler:
+    """
+    Per-feature scaling for tabular metadata features.
+
+    Strategy:
+        - Binary features: no scaling (already in [0, 1])
+        - Ratio features: no scaling (already in [0, 1])
+        - Heavy-tailed counts: log1p transform, then RobustScaler
+        - Discrete counts: RobustScaler (median/IQR)
+
+    Fit on TRAIN ONLY. Apply to all splits to prevent leakage.
+    """
+
+    def __init__(
+        self,
+        feature_columns: List[str],
+        feature_types: Dict[str, str] = None
+    ):
+        """
+        Initialize the scaler.
+
+        Args:
+            feature_columns: List of metadata feature column names.
+            feature_types: Dict mapping column name to scaling type.
+                If None, uses METADATA_FEATURE_TYPES.
+        """
+        self.feature_columns = feature_columns
+        self.feature_types = feature_types or METADATA_FEATURE_TYPES
+
+        # Validate that all columns have a known type
+        for col in feature_columns:
+            if col not in self.feature_types:
+                raise ValueError(
+                    f"Feature '{col}' has no scaling type defined in METADATA_FEATURE_TYPES"
+                )
+
+        # One RobustScaler per scalable feature (allows per-feature inspection)
+        self.scalers: Dict[str, RobustScaler] = {}
+        self.is_fitted = False
+
+    def fit(self, df: pd.DataFrame) -> "MetadataScaler":
+        """
+        Fit scalers on the TRAINING dataframe only.
+
+        Args:
+            df: Training DataFrame.
+
+        Returns:
+            self (for chaining).
+        """
+        for col in self.feature_columns:
+            ftype = self.feature_types[col]
+
+            if ftype in ("binary", "ratio"):
+                # No scaler needed for binary/ratio features
+                continue
+
+            # Get column values
+            if col not in df.columns:
+                logger.warning(f"Column '{col}' not found in DataFrame, skipping")
+                continue
+
+            values = df[col].values.astype(np.float32).reshape(-1, 1)
+
+            # Handle missing values: fill with median before fitting
+            mask = ~np.isnan(values).flatten()
+            if mask.sum() < len(values):
+                median_val = np.nanmedian(values)
+                values = np.where(np.isnan(values), median_val, values)
+
+            if ftype == "log_robust":
+                # log1p handles zeros (log(1+0)=0) and compresses tails
+                values = np.log1p(np.maximum(values, 0))
+
+            scaler = RobustScaler(quantile_range=(25.0, 75.0))
+            scaler.fit(values)
+            self.scalers[col] = scaler
+
+        self.is_fitted = True
+        return self
+
+    def transform(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Transform a dataframe to a [N, len(feature_columns)] float32 array.
+
+        Output is in roughly [-3, 3] range for scaled features,
+        [0, 1] for binary/ratio features.
+
+        Args:
+            df: DataFrame to transform.
+
+        Returns:
+            Transformed array of shape (N, num_features) with dtype float32.
+        """
+        if not self.is_fitted:
+            raise RuntimeError(
+                "Scaler must be fit before transform. Call .fit(train_df) first."
+            )
+
+        out = np.zeros((len(df), len(self.feature_columns)), dtype=np.float32)
+
+        for i, col in enumerate(self.feature_columns):
+            ftype = self.feature_types[col]
+
+            if col not in df.columns:
+                logger.warning(
+                    f"Column '{col}' not found in DataFrame, filling with zeros"
+                )
+                out[:, i] = 0.0
+                continue
+
+            values = df[col].values.astype(np.float32)
+
+            # Scaling by feature type
+            if ftype == "binary":
+                # Fill NaN with 0 (assume "feature absent")
+                values = np.nan_to_num(values, nan=0.0)
+                values = np.clip(values, 0.0, 1.0)
+
+            elif ftype == "ratio":
+                # Fill NaN with 0, clip to [0, 1]
+                values = np.nan_to_num(values, nan=0.0)
+                values = np.clip(values, 0.0, 1.0)
+
+            elif ftype == "log_robust":
+                # Fill NaN with 0 in input space (log1p(0)=0)
+                values = np.nan_to_num(values, nan=0.0)
+                values = np.log1p(np.maximum(values, 0)).reshape(-1, 1)
+                values = self.scalers[col].transform(values).flatten()
+                # Clip to ±5 to prevent extreme outliers
+                values = np.clip(values, -5.0, 5.0)
+
+            elif ftype == "robust":
+                values = np.nan_to_num(values, nan=0.0).reshape(-1, 1)
+                values = self.scalers[col].transform(values).flatten()
+                values = np.clip(values, -5.0, 5.0)
+
+            else:
+                raise ValueError(f"Unknown feature type: {ftype}")
+
+            out[:, i] = values
+
+        return out
+
+    def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
+        """Fit and transform in one call."""
+        return self.fit(df).transform(df)
+
+    def save(self, path: Path) -> None:
+        """
+        Save fitted scaler to disk for reuse on val/test/inference.
+
+        Args:
+            path: Path to save the scaler pickle file.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(
+            {
+                "feature_columns": self.feature_columns,
+                "feature_types": self.feature_types,
+                "scalers": self.scalers,
+                "is_fitted": self.is_fitted,
+            },
+            path,
+        )
+        logger.info(f"Saved MetadataScaler to {path}")
+
+    @classmethod
+    def load(cls, path: Path) -> "MetadataScaler":
+        """
+        Load a fitted scaler from disk.
+
+        Args:
+            path: Path to the saved scaler pickle file.
+
+        Returns:
+            Loaded MetadataScaler instance.
+        """
+        data = joblib.load(path)
+        instance = cls(data["feature_columns"], data["feature_types"])
+        instance.scalers = data["scalers"]
+        instance.is_fitted = data["is_fitted"]
+        return instance
+
+    def get_feature_stats(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Diagnostic: return summary of feature distributions before/after scaling.
+
+        Args:
+            df: DataFrame to analyze.
+
+        Returns:
+            DataFrame with raw and scaled statistics for each feature.
+        """
+        scaled = self.transform(df)
+        rows = []
+
+        for i, col in enumerate(self.feature_columns):
+            if col not in df.columns:
+                logger.warning(f"Column '{col}' not in DataFrame for stats")
+                continue
+
+            raw = df[col].values
+            row = {
+                "feature": col,
+                "type": self.feature_types[col],
+                "raw_mean": np.nanmean(raw),
+                "raw_std": np.nanstd(raw),
+                "raw_min": np.nanmin(raw),
+                "raw_max": np.nanmax(raw),
+                "scaled_mean": scaled[:, i].mean(),
+                "scaled_std": scaled[:, i].std(),
+                "scaled_min": scaled[:, i].min(),
+                "scaled_max": scaled[:, i].max(),
+            }
+            rows.append(row)
+
+        return pd.DataFrame(rows)
+
 def split_by_page(
     df: pd.DataFrame, train_ratio: float, val_ratio: float, seed: int
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -433,13 +688,40 @@ def run_preprocessing_pipeline(config: Dict,
 
     # ========== STEP 7: Fit and apply metadata scaler ==========
     logger.info("\n[STEP 7] Fitting metadata scaler on training split only...")
-    scaler = fit_metadata_scaler(train_df, metadata_features, processed_dir)
-
-    logger.info("Applying scaler to val split...")
-    val_df = apply_metadata_scaler(val_df, metadata_features, scaler)
     
-    logger.info("Applying scaler to test split...")
-    test_df = apply_metadata_scaler(test_df, metadata_features, scaler)
+    scaler = MetadataScaler(
+        feature_columns=metadata_features,
+        feature_types=METADATA_FEATURE_TYPES,
+    )
+    scaler.fit(train_df)
+    
+    # Save scaler to disk
+    scaler_path = processed_path / "metadata_scaler.joblib"
+    scaler.save(scaler_path)
+    logger.info(f"Metadata scaler saved to {scaler_path}")
+    
+    # Print diagnostic stats
+    logger.info("\n  Scaled metadata feature statistics (TRAIN):")
+    stats_df = scaler.get_feature_stats(train_df)
+    logger.info("\n" + stats_df.to_string(index=False))
+    
+    # Apply scaler to all splits
+    logger.info("\nApplying scaler to all splits...")
+    
+    # For train, val, test - keep the original features but also store scaled arrays
+    train_scaled = scaler.transform(train_df)
+    val_scaled = scaler.transform(val_df)
+    test_scaled = scaler.transform(test_df)
+    
+    # Save scaled metadata arrays for direct loading in dataset
+    np.save(processed_path / "train_metadata_scaled.npy", train_scaled)
+    np.save(processed_path / "val_metadata_scaled.npy", val_scaled)
+    np.save(processed_path / "test_metadata_scaled.npy", test_scaled)
+    logger.info(f"Saved scaled metadata arrays:")
+    logger.info(f"  train_metadata_scaled.npy: shape {train_scaled.shape}")
+    logger.info(f"  val_metadata_scaled.npy: shape {val_scaled.shape}")
+    logger.info(f"  test_metadata_scaled.npy: shape {test_scaled.shape}")
+    
     logger.info("Metadata scaler applied to all splits")
 
     # ========== STEP 8: Run leakage audit ==========

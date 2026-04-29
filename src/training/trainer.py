@@ -16,6 +16,7 @@ from src.evaluation.metrics import compute_all_metrics, log_metrics_to_file
 from src.losses.combined_loss import CombinedLoss
 from src.models.full_model import MultimodalMisinfoDetector
 from src.training.early_stopping import EarlyStopping
+from src.training.optim import build_optimizer_phase1
 from src.training.scheduler import get_scheduler
 from src.utils.checkpoint import load_checkpoint, save_checkpoint
 from src.utils.logger import get_logger
@@ -69,12 +70,11 @@ class Trainer:
 
         # Initialize optimizer with Phase 1 setup (encoders frozen)
         # Note: Encoders are already frozen by model.__init__
-        param_groups = self.model.get_optimizer_param_groups(
-            lr_fusion=config["training"]["lr_fusion"],
-            lr_encoders=config["training"]["lr_encoders"],
-            weight_decay=config["training"].get("weight_decay", 1e-4),
-        )
-        self.optimizer = torch.optim.AdamW(param_groups)
+        # Using build_optimizer_phase1() to avoid allocating optimizer state
+        # for 220M frozen encoder parameters (~1.3 GB on GPU)
+        # Also includes learnable temperature parameter from contrastive loss
+        self.optimizer, _ = build_optimizer_phase1(self.model, self.loss_fn, config)
+
 
         # Initialize scheduler (step-based warmup + cosine decay)
         total_steps = (
@@ -123,35 +123,109 @@ class Trainer:
         
         Called exactly once at the start of Phase 2 (epoch freeze_encoder_epochs + 1).
         
+        This is the CRITICAL phase where we:
+        1. Unfreeze top-k encoder blocks in the model
+        2. Inject those newly trainable params into the optimizer's empty encoder groups
+        3. Update learning rates and scheduler state
+        
+        Without this injection, unfrozen params won't be optimized because they were
+        never registered in any optimizer param_group.
+        
         Actions:
-        - Unfreeze top-k encoder blocks in model
-        - Update encoder parameter group LR to target value with initial_lr
-        - Record current step counter for Phase 2 warmup tracking
-        - Set Phase 2 warmup duration
-        - Log the transition and encoder LR
+        - Unfreeze top-k encoder blocks in model via model.unfreeze_encoders()
+        - Extract the newly trainable text_encoder and image_encoder params
+        - Inject into optimizer.param_groups[0] (text_encoder) and [1] (image_encoder)
+        - Set their LR to config["training"]["lr_encoders"]
+        - Initialize AdamW state (m_t=0, v_t=0) for them on first optimizer.step()
+        - Update scheduler's base_lrs if it tracks by param_group index
+        - Log statistics about the transition
         """
-        self.model.unfreeze_encoders(self.config["training"]["unfreeze_top_k_blocks"])
-
-        # Update encoder parameter group LR (already in optimizer from init,
-        # but was at 0 / frozen — now set to target LR)
-        for param_group in self.optimizer.param_groups:
-            if param_group.get("name") == "encoders":
-                param_group["lr"] = self.config["training"]["lr_encoders"]
-                param_group["initial_lr"] = self.config["training"]["lr_encoders"]
-
-        # Record step counter for Phase 2 scheduler
+        cfg_training = self.config["training"]
+        k = cfg_training.get("unfreeze_top_k_blocks", 4)
+        
+        # ===== STEP 1: Unfreeze encoder blocks in the model =====
+        self.logger.info(f"Unfreezing top-{k} encoder blocks...")
+        self.model.unfreeze_encoders(k)
+        
+        # ===== STEP 2: Collect newly trainable encoder parameters =====
+        # Text encoder: unfreeze top-k blocks of PhoBERT (HuggingFace model)
+        # Access: model.text_encoder.model.encoder.layer[-k:]
+        text_unfrozen_params = []
+        if hasattr(self.model.text_encoder.model, "encoder"):
+            if hasattr(self.model.text_encoder.model.encoder, "layer"):
+                text_blocks = self.model.text_encoder.model.encoder.layer
+                for block in text_blocks[-k:]:
+                    for p in block.parameters():
+                        if p.requires_grad:
+                            text_unfrozen_params.append(p)
+        
+        # Image encoder: unfreeze top-k blocks of ViT (timm model)
+        # Access: model.image_encoder.model.blocks[-k:]
+        image_unfrozen_params = []
+        if hasattr(self.model.image_encoder.model, "blocks"):
+            image_blocks = self.model.image_encoder.model.blocks
+            for block in image_blocks[-k:]:
+                for p in block.parameters():
+                    if p.requires_grad:
+                        image_unfrozen_params.append(p)
+        
+        n_text = sum(p.numel() for p in text_unfrozen_params)
+        n_image = sum(p.numel() for p in image_unfrozen_params)
+        
+        self.logger.info(
+            f"Collected {len(text_unfrozen_params)} text encoder params "
+            f"({n_text:,} total) and {len(image_unfrozen_params)} image encoder params "
+            f"({n_image:,} total)"
+        )
+        
+        # ===== STEP 3: Inject into optimizer's empty param groups =====
+        # Group 0: text_encoder (was empty, now populated)
+        assert self.optimizer.param_groups[0]["name"] == "text_encoder", \
+            "Expected param_group[0] to be text_encoder"
+        self.optimizer.param_groups[0]["params"] = text_unfrozen_params
+        self.optimizer.param_groups[0]["lr"] = cfg_training.get("lr_encoders", 1.0e-5)
+        self.optimizer.param_groups[0]["initial_lr"] = cfg_training.get("lr_encoders", 1.0e-5)
+        
+        # Group 1: image_encoder (was empty, now populated)
+        assert self.optimizer.param_groups[1]["name"] == "image_encoder", \
+            "Expected param_group[1] to be image_encoder"
+        self.optimizer.param_groups[1]["params"] = image_unfrozen_params
+        self.optimizer.param_groups[1]["lr"] = cfg_training.get("lr_encoders", 1.0e-5)
+        self.optimizer.param_groups[1]["initial_lr"] = cfg_training.get("lr_encoders", 1.0e-5)
+        
+        # ===== STEP 4: Update scheduler's base_lrs if applicable =====
+        # Some schedulers (like CosineAnnealingWarmRestarts, StepLR) track base_lrs
+        if hasattr(self.scheduler, "base_lrs"):
+            # Ensure scheduler knows about the new effective LRs for groups 0 and 1
+            if len(self.scheduler.base_lrs) >= 4:
+                self.scheduler.base_lrs[0] = cfg_training.get("lr_encoders", 1.0e-5)
+                self.scheduler.base_lrs[1] = cfg_training.get("lr_encoders", 1.0e-5)
+                self.logger.info(
+                    f"Updated scheduler base_lrs: groups[0,1]={self.scheduler.base_lrs[0]:.2e}"
+                )
+        
+        # ===== STEP 5: Critical note on optimizer state initialization =====
+        # AdamW maintains state (m_t, v_t) keyed by param id.
+        # Newly added params have NO state yet.
+        # On the next optimizer.step(), they will be initialized:
+        #   m_t = 0 (first moment)
+        #   v_t = 0 (second moment)
+        # This is the CORRECT standard behavior — we do NOT manually initialize their state.
+        # DO NOT copy state from other params — that would corrupt the optimization.
+        
+        # ===== STEP 6: Record phase transition metadata =====
         self.phase2_start_step = self.global_step
-
-        # Phase 2 warmup: linearly ramp encoder LR from 0 to lr_encoders
-        # over warmup_steps steps before cosine decay takes over
         self.phase2_warmup_steps = self.config["training"].get("warmup_steps", 800)
-
+        
         self.logger.info("=" * 70)
         self.logger.info(f"Phase 2 Started: Encoder Fine-tuning Initialized")
-        self.logger.info(f"  Encoder LR: {self.config['training']['lr_encoders']:.2e}")
+        self.logger.info(f"  Text encoder params: {len(text_unfrozen_params)} ({n_text:,})")
+        self.logger.info(f"  Image encoder params: {len(image_unfrozen_params)} ({n_image:,})")
+        self.logger.info(f"  Encoder LR: {cfg_training.get('lr_encoders', 1.0e-5):.2e}")
         self.logger.info(f"  Phase 2 warmup steps: {self.phase2_warmup_steps}")
         self.logger.info(f"  Start step: {self.phase2_start_step}")
         self.logger.info("=" * 70)
+
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
         """
@@ -177,6 +251,7 @@ class Trainer:
         total_cls_loss = 0.0
         total_con_loss = 0.0
         total_cosine_sim = 0.0
+        total_temperature = 0.0
         num_batches = 0
 
         for batch_idx, batch in enumerate(self.train_loader):
@@ -223,7 +298,8 @@ class Trainer:
                         f"[Diag] t_proj norm: {t.norm(dim=-1).mean():.4f} | "
                         f"i_proj norm: {i.norm(dim=-1).mean():.4f} | "
                         f"cos_sim: mean={cos_sim.mean():.4f} std={cos_sim.std():.4f} | "
-                        f"t_proj std: {t.std():.6f} | i_proj std: {i.std():.6f}"
+                        f"t_proj std: {t.std():.6f} | i_proj std: {i.std():.6f} | "
+                        f"τ={loss_dict.get('temperature', torch.tensor(0)).item():.4f}"
                     )
 
             # Gradient clipping
@@ -247,29 +323,34 @@ class Trainer:
             total_loss += loss.item()
             total_cls_loss += loss_dict["cls_loss"].item()
             total_con_loss += loss_dict["con_loss"].item()
+            total_temperature += loss_dict.get("temperature", torch.tensor(0.0)).item()
             num_batches += 1
 
             if (batch_idx + 1) % max(1, len(self.train_loader) // 5) == 0:
+                avg_temp = total_temperature / num_batches
                 self.logger.info(
                     f"[Epoch {epoch+1}] Batch {batch_idx+1}/{len(self.train_loader)} | "
-                    f"Loss: {total_loss/num_batches:.6f}"
+                    f"Loss: {total_loss/num_batches:.6f} | τ={avg_temp:.4f}"
                 )
 
         mean_loss = total_loss / num_batches
         mean_cls_loss = total_cls_loss / num_batches
         mean_con_loss = total_con_loss / num_batches
         mean_cosine_sim = total_cosine_sim / num_batches
+        mean_temperature = total_temperature / num_batches
 
         self.logger.info(
             f"[Epoch {epoch+1}] Train Loss: {mean_loss:.6f} "
             f"(cls={mean_cls_loss:.6f}, con={mean_con_loss:.6f}) | "
-            f"Mean intra-batch cosine sim: {mean_cosine_sim:.4f}"
+            f"Mean intra-batch cosine sim: {mean_cosine_sim:.4f} | "
+            f"final τ={mean_temperature:.4f}"
         )
 
         return {
             "loss": mean_loss,
             "cls_loss": mean_cls_loss,
             "con_loss": mean_con_loss,
+            "temperature": mean_temperature,
         }
 
     def evaluate(self, loader: DataLoader, split: str = "val") -> dict[str, float]:
@@ -281,7 +362,7 @@ class Trainer:
             split: Split name ("val" or "test") for logging.
 
         Returns:
-            Dictionary with all metrics from compute_all_metrics.
+            Dictionary with all metrics from compute_all_metrics, plus per-class metrics.
         """
         self.model.eval()
         all_logits = []
@@ -308,14 +389,92 @@ class Trainer:
 
         # Compute metrics
         metrics = compute_all_metrics(labels_np, proba_np, threshold=0.5)
+        
+        # Add per-class metrics
+        per_class_metrics = self._compute_per_class_metrics(labels_np, proba_np)
+        metrics.update(per_class_metrics)
 
         self.logger.info(
             f"[{split.upper()}] Accuracy: {metrics['accuracy']:.4f} | "
             f"F1-Macro: {metrics['f1_macro']:.4f} | "
-            f"ROC-AUC: {metrics['auc_roc']:.4f}"
+            f"ROC-AUC: {metrics['auc_roc']:.4f} | "
+            f"Recall_Pos: {metrics.get('recall_pos', 0):.4f} | "
+            f"Recall_Neg: {metrics.get('recall_neg', 0):.4f} | "
+            f"Miss_Rate: {metrics.get('miss_rate', 0):.4f}"
         )
 
         return metrics
+
+    def _compute_per_class_metrics(
+        self,
+        labels: np.ndarray,
+        proba: np.ndarray,
+        threshold: float = 0.5,
+    ) -> dict[str, float]:
+        """
+        Compute per-class metrics: precision, recall, F1, miss_rate, false_alarm_rate.
+
+        For binary classification:
+        - Class 0 (Negative/TrueNegative): authentic/non-misinformation
+        - Class 1 (Positive/Misinformation): the target of interest
+
+        Metrics:
+        - precision_pos: TP / (TP + FP) — how many predicted positives are correct
+        - recall_pos: TP / (TP + FN) — how many true positives we catch
+        - f1_pos: Harmonic mean of precision and recall for positive class
+        - precision_neg: TN / (TN + FN) — how many predicted negatives are correct
+        - recall_neg: TN / (TN + FP) — how many true negatives we correctly identify
+        - f1_neg: Harmonic mean for negative class
+        - miss_rate: FN / (TP + FN) — rate of missed positives (operationally critical)
+        - false_alarm_rate: FP / (TN + FP) — rate of false positives
+        - confusion_matrix: [TN, FP; FN, TP]
+
+        Args:
+            labels: Binary labels [0, 1], shape (N,)
+            proba: Predicted probabilities in [0, 1], shape (N,)
+            threshold: Classification threshold (default: 0.5)
+
+        Returns:
+            Dictionary with keys: recall_pos, recall_neg, precision_pos, precision_neg,
+            f1_pos, f1_neg, miss_rate, false_alarm_rate, confusion_matrix
+        """
+        preds = (proba >= threshold).astype(int)
+        
+        # Compute confusion matrix components
+        tp = np.sum((preds == 1) & (labels == 1))
+        tn = np.sum((preds == 0) & (labels == 0))
+        fp = np.sum((preds == 1) & (labels == 0))
+        fn = np.sum((preds == 0) & (labels == 1))
+        
+        # Per-class metrics
+        precision_pos = tp / (tp + fp + 1e-8)
+        recall_pos = tp / (tp + fn + 1e-8)
+        f1_pos = 2 * (precision_pos * recall_pos) / (precision_pos + recall_pos + 1e-8)
+        
+        precision_neg = tn / (tn + fn + 1e-8)
+        recall_neg = tn / (tn + fp + 1e-8)
+        f1_neg = 2 * (precision_neg * recall_neg) / (precision_neg + recall_neg + 1e-8)
+        
+        # Operational metrics
+        miss_rate = fn / (tp + fn + 1e-8)  # Rate of missed positives
+        false_alarm_rate = fp / (tn + fp + 1e-8)  # Rate of false positives
+        
+        return {
+            "recall_pos": float(recall_pos),
+            "recall_neg": float(recall_neg),
+            "precision_pos": float(precision_pos),
+            "precision_neg": float(precision_neg),
+            "f1_pos": float(f1_pos),
+            "f1_neg": float(f1_neg),
+            "miss_rate": float(miss_rate),
+            "false_alarm_rate": float(false_alarm_rate),
+            "confusion_matrix": {
+                "tn": int(tn),
+                "fp": int(fp),
+                "fn": int(fn),
+                "tp": int(tp),
+            },
+        }
 
     def train(self) -> None:
         """
