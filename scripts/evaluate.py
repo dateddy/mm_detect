@@ -21,7 +21,7 @@ from src.evaluation.metrics import (
     find_best_threshold,
     print_classification_report,
 )
-from src.models.full_model import MultimodalMisinfoDetector
+from src.models import build_model
 from src.utils.checkpoint import load_checkpoint
 from src.utils.logger import get_logger
 from src.utils.seed import set_seed
@@ -103,7 +103,7 @@ def main():
 
     # Load model
     logger.info(f'Loading model from {args.checkpoint}')
-    model = MultimodalMisinfoDetector(config)
+    model = build_model(config)
     state_dict, _ = load_checkpoint(args.checkpoint)
     model.load_state_dict(state_dict)
     model.to(device)

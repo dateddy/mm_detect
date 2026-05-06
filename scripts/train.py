@@ -19,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.data.dataset import create_datasets
 from src.data.preprocessing import compute_class_weights
 from src.losses.combined_loss import CombinedLoss
-from src.models.full_model import MultimodalMisinfoDetector, model_summary 
+from src.models import build_model, MultimodalMisinfoDetector
+from src.models.full_model import model_summary
 from src.training.trainer import Trainer
 from src.utils.logger import get_logger
 from src.utils.seed import set_seed
@@ -75,6 +76,13 @@ def parse_args():
         type=str,
         default=None,
         help="Experiment name appended to output dir (default: timestamp)",
+    )
+    parser.add_argument(
+        "--ablation_mode",
+        type=str,
+        default="full",
+        choices=["full", "text_only", "image_only", "metadata_only"],
+        help="Ablation mode: 'full' (multimodal), 'text_only', 'image_only', or 'metadata_only' (default: full)",
     )
     parser.add_argument(
         "--dry_run",
@@ -279,7 +287,9 @@ def main():
 
     # ========== 11. Build model ==========
     logger.info("Building model...")
-    model = MultimodalMisinfoDetector(config)
+    logger.info(f"Ablation mode: {args.ablation_mode}")
+    config["ablation_mode"] = args.ablation_mode
+    model = build_model(config)
     model.to(device)
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -298,10 +308,16 @@ def main():
     loss_fn = CombinedLoss(
         class_weights=class_weights,
         contrastive_lambda=config["loss"].get("contrastive_lambda", 0.1),
-        temperature=config["loss"].get("contrastive_temperature", 0.07),
+        contrastive_temperature_init=config["loss"].get("contrastive_temperature_init", 0.07),
         label_smoothing=config["loss"].get("label_smoothing", 0.0),
+        cls_loss_type=config["loss"].get("cls_loss_type", "bce"),
+        focal_alpha=config["loss"].get("focal_alpha", 0.5),
+        focal_gamma=config["loss"].get("focal_gamma", 2.0),
+        focal_gamma_pos=config["loss"].get("focal_gamma_pos", 1.0),
+        focal_gamma_neg=config["loss"].get("focal_gamma_neg", 4.0),
+        focal_clip=config["loss"].get("focal_clip", 0.05),
     )
-    logger.info(f"Loss: CombinedLoss with pos_weight={class_weights[0].item():.4f}, label_smoothing={config['loss'].get('label_smoothing', 0.0)}")
+    logger.info(f"Loss: CombinedLoss (type={config['loss'].get('cls_loss_type', 'bce')}), label_smoothing={config['loss'].get('label_smoothing', 0.0)}")
 
     # ========== 13. Resume from checkpoint if specified ==========
     start_epoch = 0
