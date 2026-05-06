@@ -3,6 +3,8 @@
 # Train on text+image modalities only
 # Inherit all other settings from base.yaml
 
+ablation_mode: text_image
+
 # Remove all metadata features to test text+image only performance
 metadata_features: []
 

@@ -2,6 +2,8 @@
 # This config removes the contrastive (InfoNCE) component to test BCE-only loss
 # Inherit all other settings from base.yaml
 
+ablation_mode: full_no_contrastive
+
 # Ablate contrastive loss by setting lambda=0.0
 loss:
   contrastive_lambda: 0.0

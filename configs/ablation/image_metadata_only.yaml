@@ -1,0 +1,12 @@
+# configs/ablation/image_metadata_only.yaml
+# @package _global_
+
+ablation_mode: image_metadata
+experiment_name: ablation_image_metadata
+output_dir: outputs/ablation_image_metadata
+
+loss:
+  contrastive_lambda: 0.0
+
+training:
+  modality_dropout: 0.15

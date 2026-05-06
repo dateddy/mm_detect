@@ -2,6 +2,8 @@
 # This config disables cross-attention and gating to test simple concatenation baseline
 # Inherit all other settings from base.yaml
 
+ablation_mode: full_no_attention
+
 # Disable cross-attention by setting num_attn_heads to 0 and dropout to 1.0 (effectively disabling)
 model:
   proj_dim: 256

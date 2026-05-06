@@ -1,0 +1,10 @@
+# configs/ablation/no_contrastive.yaml
+# Full architecture but contrastive auxiliary loss disabled.
+# @package _global_
+
+ablation_mode: full_no_contrastive
+experiment_name: ablation_no_contrastive
+output_dir: outputs/ablation_no_contrastive
+
+loss:
+  contrastive_lambda: 0.0

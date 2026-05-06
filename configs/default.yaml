@@ -1,35 +1,10 @@
-# Model configuration
-model:
-  hidden_dim: 256
-  num_heads: 8
-  attention_dropout: 0.1
-  modality_dropout_rate: 0.15
-  head_dropout: 0.3
+# configs/default.yaml
+# Default profile: Full multimodal model
+# @package _global_
 
-# Training configuration
-training:
-  num_epochs: 10  # Total
-  phase1_epochs: 3
-  phase2_epochs: 7
-  batch_size: 32
-  gradient_clip_norm: 1.0
-  use_amp: true
-  early_stopping_patience: 5
-  log_freq: 10
-
-# Optimizer configuration
-optimizer:
-  type: 'adamw'
-  lr_phase1: 0.0003
-  lr_phase2_encoder: 0.00001
-  lr_phase2_head: 0.0003
-  weight_decay: 0.01
-
-# Loss configuration
-loss:
-  use_class_weights: true
-  contrastive_weight: 0.1
-  contrastive_temperature: 0.07
+ablation_mode: full
+experiment_name: multimodal_full
+output_dir: outputs/multimodal_full
 
 # Data configuration
 data:

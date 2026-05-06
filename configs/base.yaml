@@ -1,108 +1,57 @@
-# Multimodal Misinformation Detection - Base Configuration
-# This is the primary configuration file for the project.
-# All paths are relative to the project root unless specified as absolute.
+# configs/base.yaml
+# Master configuration. Other configs inherit from this and override specific fields.
 
-# ============================================================================
-# Paths
-# ============================================================================
+# ========================================
+# Ablation control (single source of truth)
+# ========================================
+ablation_mode: full
+
+# ========================================
+# Project paths
+# ========================================
 paths:
-  data_dir: data
+  data_dir: data/
   raw_csv: data/raw/ads_vietnam_clean.csv
-  images_dir: data/raw/ad_images
-  processed_dir: data/processed
-  embeddings_dir: data/embeddings
-  output_dir: outputs
-  checkpoint_dir: experiments
-  log_dir: outputs/logs
-  metadata_scaler: data/processed/metadata_scaler.joblib  # Path to fitted scaler artifact
+  images_dir: data/raw/ad_images/
+  processed_dir: data/processed/
+  metadata_scaler: data/processed/metadata_scaler.joblib
+  output_dir: outputs/
+  log_dir: outputs/logs/
 
-# ============================================================================
-# Encoders
-# ============================================================================
-encoders:
-  text_encoder_name: vinai/phobert-base-v2
-  image_encoder_name: vit_base_patch16_224
-  image_size: 224
-  max_text_len: 256
-
-# ============================================================================
-# Model Architecture
-# ============================================================================
-model:
-  metadata_input_dim: 17               # number of metadata features (must match len(metadata_features))
-  metadata_hidden_dims: [64, 128, 256] # gradual expansion: 17 → 64 → 128 → 256
-  proj_dim: 512
-  num_attn_heads: 8
-  attn_dropout: 0.1
-  modality_dropout_p: 0.15
-  head_dropout: 0.3
-
-# ============================================================================
-# Training
-# ============================================================================
-training:
-  batch_size: 32
-  max_epochs: 30
-  freeze_encoder_epochs: 3
-  unfreeze_top_k_blocks: 4
-  lr_fusion: 3.0e-4
-  lr_encoders: 3.0e-5
-  weight_decay: 0.01
-  warmup_steps: 400
-  lr_min: 1.0e-7
-  gradient_clip: 1.0
-  mixed_precision: true
-  early_stopping_patience: 8
-  early_stopping_metric: f1_macro
-  early_stopping_ema_alpha: 0.7
-
-# ============================================================================
-# Loss
-# ============================================================================
-loss:
-  contrastive_lambda: 0.1
-  contrastive_temperature_init: 0.07  # CLIP-style learnable temperature (was: fixed 0.1)
-  label_smoothing: 0.05               # only used with cls_loss_type: bce
-  
-  # Classification loss type (NEW in FIX 4)
-  cls_loss_type: bce                  # "bce" | "focal" | "asymmetric_focal"
-  
-  # Focal Loss parameters (used when cls_loss_type in {focal, asymmetric_focal})
-  focal_alpha: 0.5                    # 0.5 = balanced, > 0.5 emphasizes positive class (recall)
-  focal_gamma: 2.0                    # standard Focal Loss focusing parameter
-  
-  # Asymmetric Focal Loss parameters (used when cls_loss_type = asymmetric_focal)
-  focal_gamma_pos: 1.0                # lower γ for positives = more gradient when missed FN
-  focal_gamma_neg: 4.0                # higher γ for negatives = down-weight easy negatives (FP)
-  focal_clip: 0.05                    # probability shift to help very confident negatives
-
-# ============================================================================
+# ========================================
 # Data
-# ============================================================================
+# ========================================
 data:
-  train_ratio: 0.70
-  val_ratio: 0.15
-  test_ratio: 0.15
-  random_seed: 42
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  split_seed: 42
+  split_strategy: page_level
+  num_workers: 4
+  pin_memory: true
 
-# ============================================================================
-# Text Cleaning
-# ============================================================================
-text:
-  # Columns to apply clean_text() to in preprocessing.py
-  # Operations: lowercase, remove URLs, remove HTML tags,
-  # remove @mentions, remove #hashtags, normalize whitespace
-  columns:
-    - ad_creative_bodies
-    - ad_creative_link_titles
+# ========================================
+# Model architecture
+# ========================================
+model:
+  text_model_name: "vinai/phobert-base-v2"
+  image_model_name: "vit_base_patch16_224"
+  
+  max_text_len: 256
+  image_size: 224
+  
+  projection_dim: 256
+  num_attn_heads: 8
+  num_attn_layers: 1
+  
+  projection_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.3
 
-# ============================================================================
-# Metadata Features
-# ============================================================================
-# 22 features total: 9 original behavioral + 4 text-based + 4 raw text + 1 time + more
-# Note: Only numeric features listed here for RobustScaler
+# ========================================
+# Metadata feature engineering
+# ========================================
 metadata_features:
-  # Original 9 behavioral features
   - ads_per_page
   - platform_count
   - FB_only_flag
@@ -112,18 +61,62 @@ metadata_features:
   - launch_delay
   - num_countries
   - language_location_mismatch
+  - emoji_count
+  - text_length
+  - ads_duration
+  - repeated_text_ratio
+  - exclamation_ratio
+  - caps_word_ratio
+  - repeated_punct_count
+  - url_count
+
+# ========================================
+# Training
+# ========================================
+training:
+  batch_size: 32
+  max_epochs: 30
+  patience: 8
+  early_stopping_metric: auc_roc
   
-  # New numeric engineered features (text-based, time-based, page-based, spend-based)
-  - emoji_count                 # Count of total emojis (0-N) - NUMERIC
-  - text_length                 # Character length of ad creative body - NUMERIC
-  - ads_duration                # Duration of ad campaign in days - NUMERIC
-  - repeated_text_ratio         # Proportion of repeated ad text per page (template scams) - NUMERIC
+  lr_fusion: 3.0e-4
+  lr_encoders: 3.0e-6
+  weight_decay: 0.01
+  warmup_steps: 800
+  lr_min: 1.0e-7
+  
+  freeze_encoder_epochs: 3
+  unfreeze_top_k_blocks: 4
+  
+  modality_dropout: 0.15
+  gradient_clip: 1.0
+  use_amp: true
+  device: cuda
 
-  # Raw text features (computed BEFORE clean_text() is applied)
-  - exclamation_ratio           # Ratio of !!! to text length (emotional urgency signal) - NUMERIC
-  - caps_word_ratio             # Ratio of ALL-CAPS words to total words (sensationalism) - NUMERIC
-  - repeated_punct_count        # Count of 2+ consecutive punctuation marks (emphasis) - NUMERIC
-  - url_count                   # Number of URLs in raw text (link farm indicator) - NUMERIC
+# ========================================
+# Loss
+# ========================================
+loss:
+  cls_loss_type: bce
+  
+  # BCE-specific
+  label_smoothing: 0.05
+  
+  # Focal-specific
+  focal_alpha: 0.5
+  focal_gamma: 2.0
+  focal_gamma_pos: 1.0
+  focal_gamma_neg: 4.0
+  
+  # Contrastive
+  contrastive_lambda: 0.1
+  contrastive_temperature_init: 0.07
 
-  # Note: emojis_in_text is a string field (concatenated emojis) and is NOT scaled,
-  # but is computed during feature engineering and available in datasets
+# ========================================
+# Logging
+# ========================================
+logging:
+  log_interval: 50
+  diag_interval: 200
+  log_to_wandb: false
+  wandb_project: misinfo_detect

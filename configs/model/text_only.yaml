@@ -1,37 +1,15 @@
-# Text-only model configuration (ablation: only text modality)
+# configs/model/text_only.yaml
+# @package _global_
 
-model_name: "text_only"
-description: "Baseline: only text modality"
+ablation_mode: text_only
+experiment_name: ablation_text_only
+output_dir: outputs/ablation_text_only
 
-# Text encoder
-text_encoder:
-  type: "phobert"
-  pretrained: "vinai/phobert-base"
-  output_dim: 768
-  freeze: false
-  dropout: 0.1
+loss:
+  contrastive_lambda: 0.0
 
-# Image encoder - DISABLED
-image_encoder:
-  enabled: false
-
-# Metadata encoder - DISABLED
-metadata_encoder:
-  enabled: false
-
-# Shared projection layer
-projection:
-  input_dim: 768
-  output_dim: 256
-  dropout: 0.3
-
-# Cross-attention - DISABLED
-cross_attention:
-  enabled: false
-
-# Modality dropout - DISABLED
-modality_dropout:
-  enabled: false
+training:
+  modality_dropout: 0.0
 
 # Gating fusion - DISABLED
 gating_fusion:

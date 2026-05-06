@@ -1,48 +1,15 @@
-# Metadata-only model configuration (ablation: only metadata)
+# configs/model/metadata_only.yaml
+# @package _global_
 
-model_name: "metadata_only"
-description: "Baseline: only metadata (numerical features)"
+ablation_mode: metadata_only
+experiment_name: ablation_metadata_only
+output_dir: outputs/ablation_metadata_only
 
-# Text encoder - DISABLED
-text_encoder:
-  enabled: false
+loss:
+  contrastive_lambda: 0.0
 
-# Image encoder - DISABLED
-image_encoder:
-  enabled: false
-
-# Metadata encoder
-metadata_encoder:
-  input_dim: 32
-  hidden_dim: 128
-  output_dim: 768
-  dropout: 0.2
-  num_layers: 2
-
-# Shared projection layer
-projection:
-  input_dim: 768
-  output_dim: 256
-  dropout: 0.3
-
-# Cross-attention - DISABLED
-cross_attention:
-  enabled: false
-
-# Modality dropout - DISABLED
-modality_dropout:
-  enabled: false
-
-# Gating fusion - DISABLED
-gating_fusion:
-  enabled: false
-
-# Residual connections
-residual:
-  enabled: true
-
-# Classification head
-classification_head:
-  hidden_dim: 128
-  output_dim: 1
-  dropout: 0.3
+training:
+  modality_dropout: 0.0
+  freeze_encoder_epochs: 0
+  warmup_steps: 200
+  lr_fusion: 5.0e-4

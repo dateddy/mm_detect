@@ -2,6 +2,8 @@
 # This config removes the metadata encoder to study text+image-only fusion
 # Inherit all other settings from base.yaml
 
+ablation_mode: text_image
+
 # Remove metadata features to test text+image only
 metadata_features: []
 

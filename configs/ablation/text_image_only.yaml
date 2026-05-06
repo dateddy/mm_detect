@@ -1,52 +1,15 @@
-# Ablation: Text + Image modalities only
+# configs/ablation/text_image_only.yaml
+# @package _global_
 
-model_name: "ablation_text_image"
-description: "Ablation study: text and image without metadata"
+ablation_mode: text_image
+experiment_name: ablation_text_image
+output_dir: outputs/ablation_text_image
 
-# Text encoder
-text_encoder:
-  type: "phobert"
-  pretrained: "vinai/phobert-base"
-  output_dim: 768
-  freeze: false
-  dropout: 0.1
+loss:
+  contrastive_lambda: 0.1
 
-# Image encoder
-image_encoder:
-  type: "vit"
-  pretrained: "google/vit-base-patch16-224"
-  output_dim: 768
-  freeze: false
-  dropout: 0.1
-
-# Metadata encoder - DISABLED
-metadata_encoder:
-  enabled: false
-
-# Shared projection layer
-projection:
-  input_dim: 768
-  output_dim: 256
-  dropout: 0.3
-
-# Cross-attention
-cross_attention:
-  num_heads: 8
-  d_model: 256
-  d_ff: 1024
-  dropout: 0.3
-
-# Modality dropout
-modality_dropout:
-  enabled: true
-  text_drop_prob: 0.1
-  image_drop_prob: 0.1
-
-# Gating fusion
-gating_fusion:
-  enabled: true
-  input_dim: 256
-  num_gating_mlp_layers: 2
+training:
+  modality_dropout: 0.15
 
 # Residual connections
 residual:
