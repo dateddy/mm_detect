@@ -44,7 +44,7 @@ class MultimodalMisinfoDetector(nn.Module):
         All submodules exposed as named attributes for easy access.
     """
 
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, ablation_mode: str = "full"):
         """
         Initialize MultimodalMisinfoDetector.
 
@@ -54,10 +54,21 @@ class MultimodalMisinfoDetector(nn.Module):
                 - image_size, max_text_len
                 - proj_dim, num_attn_heads, attn_dropout, modality_dropout_p, head_dropout
                 - metadata_features: list of metadata feature names (for determining input_dim)
+            ablation_mode: Ablation mode. One of:
+                - 'full': Multimodal (default)
+                - 'text_only': Text modality only
+                - 'image_only': Image modality only
+                - 'metadata_only': Metadata modality only
         """
         super().__init__()
 
-        logger.info("Initializing MultimodalMisinfoDetector...")
+        # Validate ablation mode
+        valid_modes = {"full", "text_only", "image_only", "metadata_only"}
+        if ablation_mode not in valid_modes:
+            raise ValueError(f"ablation_mode must be one of {valid_modes}, got {ablation_mode}")
+        self.ablation_mode = ablation_mode
+
+        logger.info(f"Initializing MultimodalMisinfoDetector in '{ablation_mode}' mode...")
 
         # Extract config parameters
         text_encoder_name = config.get("text_encoder_name", "vinai/phobert-base-v2")
@@ -134,6 +145,7 @@ class MultimodalMisinfoDetector(nn.Module):
         Forward pass through the model.
 
         Handles both raw-input and offline-embedding modes transparently.
+        Supports ablation studies by bypassing multimodal components in unimodal modes.
 
         Args:
             batch: Dictionary containing:
@@ -152,11 +164,12 @@ class MultimodalMisinfoDetector(nn.Module):
         Returns:
             Dictionary with:
             - 'logits': (B, 1) classification logits
-            - 't_proj': (B, 256) text embeddings after projection — NO detach, gradient attached
-            - 'i_proj': (B, 256) image embeddings after projection — NO detach, gradient attached
-            - 't_prime': (B, 256) text after cross-attention
-            - 'i_prime': (B, 256) image after cross-attention
-            - 'image_valid': (B,) bool — True where image was NOT dropped by modality dropout
+            - 't_proj': (B, 256) text embeddings (None if not in unimodal text mode)
+            - 'i_proj': (B, 256) image embeddings (None if not in unimodal image mode)
+            - 't_prime': (B, 256) text after cross-attention (None in unimodal modes)
+            - 'i_prime': (B, 256) image after cross-attention (None in unimodal modes)
+            - 'image_valid': (B,) bool — True where image was NOT dropped (None in unimodal modes)
+            - 'is_multimodal': bool — True if multimodal components were computed, False otherwise
         """
         device = next(self.parameters()).device
 
@@ -224,26 +237,65 @@ class MultimodalMisinfoDetector(nn.Module):
         i_proj[missing_image_mask] = 0.0  # Zero out missing image embeddings
 
         # Apply modality dropout — returns BOTH masked embeddings AND validity masks
-        (t_proj, i_proj, m_proj), (t_valid, i_valid, m_valid) = self.modality_dropout(
-            t_proj, i_proj, m_proj
+        # (skip for full_no_modality_dropout mode)
+        if self.ablation_mode == "full_no_modality_dropout":
+            t_valid = i_valid = m_valid = None
+        else:
+            (t_proj, i_proj, m_proj), (t_valid, i_valid, m_valid) = self.modality_dropout(
+                t_proj, i_proj, m_proj
+            )
+
+        # === ABLATION LOGIC: Handle different modes ===
+        is_multimodal = self.ablation_mode in (
+            "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_attention", "full_no_gating"
         )
-
-        # Dual cross-attention
-        t_prime, i_prime = self.dual_cross_attn(t_proj, i_proj, m_proj)
-
-        # Gated fusion
-        fused = self.gated_fusion(t_prime, i_prime, m_proj, t_proj, i_proj)
+        
+        if is_multimodal:
+            # Full multimodal (with optional component ablations)
+            
+            # Cross-attention (skip if full_no_attention mode)
+            if self.ablation_mode == "full_no_attention":
+                # No cross-attention: use projections directly
+                t_prime, i_prime = t_proj, i_proj
+            else:
+                # Standard cross-attention
+                t_prime, i_prime = self.dual_cross_attn(t_proj, i_proj, m_proj)
+            
+            # Fusion (skip gating if full_no_gating mode, use simple sum instead)
+            if self.ablation_mode == "full_no_gating":
+                # Simple sum fusion instead of gated
+                fused = t_prime + i_prime + m_proj
+            else:
+                # Standard gated fusion
+                fused = self.gated_fusion(t_prime, i_prime, m_proj, t_proj, i_proj)
+        else:
+            # Unimodal ablation: use only the selected modality
+            # No cross-attention, no fusion — direct pathway
+            if self.ablation_mode == "text_only":
+                fused = t_proj  # Use text projection directly
+            elif self.ablation_mode == "image_only":
+                fused = i_proj  # Use image projection directly
+            elif self.ablation_mode == "metadata_only":
+                fused = m_proj  # Use metadata projection directly
+            else:
+                raise ValueError(f"Unknown ablation mode: {self.ablation_mode}")
+            
+            # Set cross-attention outputs to None (not computed in unimodal modes)
+            t_prime = None
+            i_prime = None
 
         # Classification head
         logits = self.classifier(fused)  # (B, 1)
 
         return {
             "logits": logits,
-            "t_proj": t_proj,
-            "i_proj": i_proj,
-            "t_prime": t_prime,
-            "i_prime": i_prime,
-            "image_valid": i_valid,  # Used by contrastive loss to exclude dropped images
+            "t_proj": t_proj if self.ablation_mode in ("full", "text_only") else None,
+            "i_proj": i_proj if self.ablation_mode in ("full", "image_only") else None,
+            "t_prime": t_prime,  # None in unimodal modes
+            "i_prime": i_prime,  # None in unimodal modes
+            "image_valid": i_valid if is_multimodal else None,  # None in unimodal modes
+            "is_multimodal": is_multimodal,  # Flag for loss and trainer
         }
 
     def unfreeze_encoders(self, top_k: int) -> None:

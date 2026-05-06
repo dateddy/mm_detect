@@ -185,21 +185,23 @@ class AsymmetricFocalLossWithLogits(nn.Module):
 class CombinedLoss(nn.Module):
     """
     Combined loss with classification and contrastive components.
+    ADAPTIVE: Automatically detects which components to enable based on model architecture.
 
     Supports multiple classification losses: BCE, Focal, Asymmetric Focal.
-    Always includes learnable contrastive loss (InfoNCE with learned temperature).
+    Contrastive loss is enabled only if the model output contains both 't_proj' and 'i_proj'.
 
     Total loss = L_cls + contrastive_lambda * L_con
 
     Attributes:
         cls_loss: Classification loss (BCEWithLogitsLoss, FocalLossWithLogits, or AsymmetricFocalLossWithLogits)
-        contrastive: InfoNCELoss module (always learnable temperature)
+        contrastive: InfoNCELoss module (learnable temperature)
         lambda_con: Weight for contrastive component
+        ablation_mode: Model ablation mode (detected or configured)
     """
 
     def __init__(
         self,
-        class_weights: torch.Tensor,
+        class_weights: torch.Tensor = None,
         contrastive_lambda: float = 0.1,
         contrastive_temperature_init: float = 0.07,
         label_smoothing: float = 0.0,
@@ -209,12 +211,14 @@ class CombinedLoss(nn.Module):
         focal_gamma_pos: float = 1.0,
         focal_gamma_neg: float = 4.0,
         focal_clip: float = 0.05,
+        ablation_mode: str = "full",
+        pos_weight: float = 1.0,
     ):
         """
         Initialize CombinedLoss.
 
         Args:
-            class_weights: Class weights tensor of shape (2,).
+            class_weights: Class weights tensor (legacy, prefer pos_weight).
             contrastive_lambda: Weight for contrastive loss component (default: 0.1).
             contrastive_temperature_init: Initial temperature for InfoNCE loss (default: 0.07).
             label_smoothing: Label smoothing for classification (only used with BCE).
@@ -224,19 +228,24 @@ class CombinedLoss(nn.Module):
             focal_gamma_pos: Focusing parameter for positives in AsymmetricFocalLossWithLogits.
             focal_gamma_neg: Focusing parameter for negatives in AsymmetricFocalLossWithLogits.
             focal_clip: Probability clipping for AsymmetricFocalLossWithLogits.
+            ablation_mode: Model ablation mode (e.g., "text_only", "full", "text_image").
+            pos_weight: Positive class weight for BCE (default: 1.0).
         """
         super().__init__()
 
-        # Contrastive loss (always learnable temperature)
-        self.contrastive = InfoNCELoss(init_temperature=contrastive_temperature_init)
-        self.lambda_con = contrastive_lambda
+        self.ablation_mode = ablation_mode
         self.label_smoothing = label_smoothing
         self.cls_loss_type = cls_loss_type
-
-        # Classification loss — selectable via config
+        self.contrastive_lambda_config = contrastive_lambda
+        
+        # === Determine if contrastive loss applies based on ablation mode ===
+        self.contrastive_applicable = self._is_contrastive_applicable(ablation_mode)
+        
+        # === Classification loss — selectable via config ===
         if cls_loss_type == "bce":
-            pos_weight = class_weights[1] / class_weights[0] if len(class_weights) > 1 else torch.tensor(1.0)
-            self.cls_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+            if class_weights is not None and len(class_weights) > 1:
+                pos_weight = class_weights[1] / class_weights[0]
+            self.cls_loss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pos_weight))
             logger.info(f"Using BCE loss with pos_weight={pos_weight:.4f}")
 
         elif cls_loss_type == "focal":
@@ -245,9 +254,7 @@ class CombinedLoss(nn.Module):
                 gamma=focal_gamma,
                 reduction="mean",
             )
-            logger.info(
-                f"Using Focal loss (gamma={focal_gamma}, alpha={focal_alpha})"
-            )
+            logger.info(f"Using Focal loss (gamma={focal_gamma}, alpha={focal_alpha})")
 
         elif cls_loss_type == "asymmetric_focal":
             self.cls_loss = AsymmetricFocalLossWithLogits(
@@ -269,47 +276,90 @@ class CombinedLoss(nn.Module):
                 f"Must be one of: 'bce', 'focal', 'asymmetric_focal'"
             )
 
+        # === Contrastive loss (only if applicable AND configured) ===
+        self._has_contrastive = False
+        self.contrastive = None
+        
+        if self.contrastive_applicable and contrastive_lambda > 0:
+            self.contrastive = InfoNCELoss(init_temperature=contrastive_temperature_init)
+            self._has_contrastive = True
+            self.lambda_con = contrastive_lambda
+        else:
+            # Auto-zero contrastive lambda if not applicable
+            self.lambda_con = 0.0
+            if not self.contrastive_applicable and contrastive_lambda > 0:
+                logger.warning(
+                    f"[CombinedLoss] ablation_mode='{ablation_mode}' does NOT support contrastive loss "
+                    f"(needs both text and image encoders). Forcing contrastive_lambda=0 "
+                    f"(was {contrastive_lambda})"
+                )
+        
         logger.info(
-            f"Initialized CombinedLoss "
-            f"(cls_loss_type={cls_loss_type}, lambda={contrastive_lambda}, "
-            f"init_temperature={contrastive_temperature_init}, "
-            f"label_smoothing={label_smoothing})"
+            f"[CombinedLoss] mode={ablation_mode} | cls={cls_loss_type} | "
+            f"contrastive_applicable={self.contrastive_applicable} | "
+            f"lambda_con={self.lambda_con:.4f}"
         )
 
+    @staticmethod
+    def _is_contrastive_applicable(mode: str) -> bool:
+        """
+        Check if contrastive loss can apply for a given ablation mode.
+        Contrastive needs BOTH text AND image projections.
+        """
+        modes_with_t_and_i = {
+            "full",
+            "full_no_contrastive",  # has T+I architecturally, but lambda might be forced to 0
+            "full_no_modality_dropout",
+            "full_no_attention",
+            "full_no_gating",
+            "text_image",  # T+I bimodal
+        }
+        return mode in modes_with_t_and_i
+    
     def forward(
         self,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        text_emb: torch.Tensor,
-        image_emb: torch.Tensor,
+        text_emb: torch.Tensor | None = None,
+        image_emb: torch.Tensor | None = None,
         valid_mask: torch.Tensor | None = None,
+        is_multimodal: bool = True,
+        output_dict: dict = None,  # NEW: inspect model output dict directly
     ) -> dict:
         """
         Compute combined loss.
+        
+        ADAPTIVE: Automatically skips contrastive if projections are missing or model is unimodal.
 
         Args:
             logits: Classification logits, shape (batch_size, 1).
             labels: Binary labels, shape (batch_size,) or (batch_size, 1).
-            text_emb: Text embeddings (projected), shape (batch_size, 256).
-                      MUST have requires_grad=True.
-            image_emb: Image embeddings (projected), shape (batch_size, 256).
-                      MUST have requires_grad=True.
-            valid_mask: Boolean mask indicating which samples should use contrastive loss.
-                       Shape (batch_size,). True = valid, False = skip for contrastive loss.
-                       Used to exclude samples where image was dropped by ModalityDropout.
+            text_emb: Text embeddings (projected), shape (batch_size, 256). Can be None in unimodal.
+            image_emb: Image embeddings (projected), shape (batch_size, 256). Can be None in unimodal.
+            valid_mask: Boolean mask (batch_size,) for samples with both modalities. True = both present.
+            is_multimodal: Whether model is multimodal. Can be override via output_dict.
+            output_dict: Optional model output dict. If provided, text_emb/image_emb extracted from it.
 
         Returns:
             Dictionary with keys:
             - 'loss': Total loss (scalar tensor)
-            - 'cls_loss': Classification loss component (scalar tensor, detached for logging)
-            - 'con_loss': Contrastive loss component (scalar tensor, detached for logging)
-            - 'temperature': Current temperature value (scalar tensor, detached for logging)
+            - 'cls_loss': Classification loss component (detached for logging)
+            - 'con_loss': Contrastive loss component (detached) or None if N/A
+            - 'temperature': Current temperature value (detached) or None if N/A
         """
-        # Ensure labels have correct shape for loss functions
+        # === STEP 1: Handle output_dict extraction (NEW ADAPTIVE LOGIC) ===
+        if output_dict is not None:
+            # Extract projections from output dict (if present)
+            text_emb = output_dict.get("t_proj", text_emb)
+            image_emb = output_dict.get("i_proj", image_emb)
+            is_multimodal = output_dict.get("is_multimodal", is_multimodal)
+            valid_mask = output_dict.get("image_valid", valid_mask)
+        
+        # === STEP 2: Ensure labels have correct shape for loss functions ===
         if labels.dim() == 1:
             labels = labels.unsqueeze(1)
 
-        # Classification loss
+        # === STEP 3: Classification loss ===
         targets = labels.float()
 
         # Label smoothing only for BCE (Focal handles confidence internally)
@@ -319,14 +369,29 @@ class CombinedLoss(nn.Module):
         else:
             cls_loss = self.cls_loss(logits.squeeze(-1), targets.squeeze(-1))
 
-        # Contrastive loss — only on valid (non-dropped) samples
-        con_loss = self.contrastive(text_emb, image_emb, valid_mask)
-
-        total = cls_loss + self.lambda_con * con_loss
+        # === STEP 4: ADAPTIVE Contrastive Loss ===
+        con_loss = None
+        temperature = None
+        
+        # Contrastive applies only if:
+        # 1. Model is multimodal (or has both T and I architecturally)
+        # 2. Contrastive lambda > 0
+        # 3. Both t_proj and i_proj are present in the forward output
+        if (self._has_contrastive 
+                and self.lambda_con > 0 
+                and text_emb is not None 
+                and image_emb is not None
+                and is_multimodal):
+            con_loss = self.contrastive(text_emb, image_emb, valid_mask)
+            temperature = self.contrastive.temperature.detach()
+            total = cls_loss + self.lambda_con * con_loss
+        else:
+            # Unimodal or missing projections: skip contrastive
+            total = cls_loss
 
         return {
             "loss": total,
             "cls_loss": cls_loss.detach(),
-            "con_loss": con_loss.detach(),
-            "temperature": self.contrastive.temperature.detach(),
+            "con_loss": con_loss.detach() if con_loss is not None else None,
+            "temperature": temperature,
         }

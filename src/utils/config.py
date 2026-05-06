@@ -147,3 +147,55 @@ def config_to_omegaconf(config: Dict[str, Any]) -> DictConfig:
         OmegaConf DictConfig object
     """
     return OmegaConf.create(config)
+
+
+def load_config_with_inheritance(config_path: str) -> Dict[str, Any]:
+    """
+    Load YAML config and merge with base config.
+    
+    Loads base.yaml first, then merges the specified config on top.
+    
+    Args:
+        config_path: Path to YAML file
+        
+    Returns:
+        Merged configuration dictionary
+    """
+    config_path = Path(config_path)
+    project_root = config_path.parent.parent if config_path.parent.name != "configs" else config_path.parent.parent.parent
+    
+    # Load base config first
+    base_config_path = project_root / "configs" / "base.yaml"
+    if base_config_path.exists():
+        with open(base_config_path, 'r') as f:
+            base_config = yaml.safe_load(f) or {}
+    else:
+        base_config = {}
+    
+    # Load the specified config
+    with open(config_path, 'r') as f:
+        override_config = yaml.safe_load(f) or {}
+    
+    # Merge: override takes precedence
+    return deep_merge_dicts(base_config, override_config)
+
+
+def deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursively merge override dict into base dict.
+    Override values take precedence.
+    
+    Args:
+        base: Base configuration
+        override: Override configuration
+        
+    Returns:
+        Merged configuration
+    """
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge_dicts(result[key], value)
+        else:
+            result[key] = value
+    return result

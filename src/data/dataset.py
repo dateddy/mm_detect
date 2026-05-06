@@ -46,6 +46,7 @@ class AdDataset(Dataset):
         metadata_cols: List[str],
         split: str,
         offline_embeddings_dir: Optional[str] = None,
+        ablation_mode: str = "full",
     ):
         """
         Initialize AdDataset.
@@ -57,8 +58,8 @@ class AdDataset(Dataset):
             image_transform: torchvision.transforms.Compose for image preprocessing.
             metadata_cols: List of metadata feature column names (e.g., ["ads_per_page", ...]).
             split: Dataset split identifier ('train', 'val', 'test').
-            offline_embeddings_dir: Optional directory containing pre-extracted embeddings
-                                   in format expected by this split.
+            offline_embeddings_dir: Optional directory containing pre-extracted embeddings.
+            ablation_mode: Model ablation mode. Used to skip loading unused modalities (memory savings).
         """
         self.df = df.reset_index(drop=True)
         self.images_dir = Path(images_dir)
@@ -69,6 +70,23 @@ class AdDataset(Dataset):
         self.use_offline_embeddings = False
         self.text_embeddings = None
         self.image_embeddings = None
+        
+        # === NEW: PROMPT 4 — Skip loading unused modalities based on ablation_mode ===
+        self.load_text = ablation_mode in {
+            "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_attention", "full_no_gating",
+            "text_only", "text_image", "text_metadata",
+        }
+        self.load_image = ablation_mode in {
+            "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_attention", "full_no_gating",
+            "image_only", "text_image", "image_metadata",
+        }
+        self.load_metadata = ablation_mode in {
+            "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_attention", "full_no_gating",
+            "metadata_only", "text_metadata", "image_metadata",
+        }
         
         # Warning counter for missing images (log first 10 per epoch)
         self._missing_warning_count = 0
@@ -97,6 +115,8 @@ class AdDataset(Dataset):
 
         logger.info(
             f"Initialized AdDataset (split={split}, n={len(self.df)}, "
+            f"ablation={ablation_mode}, load_text={self.load_text}, "
+            f"load_image={self.load_image}, load_metadata={self.load_metadata}, "
             f"mode={'offline' if self.use_offline_embeddings else 'online'})"
         )
 
@@ -166,76 +186,91 @@ class AdDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str, bool]]:
         """
         Get a single sample.
+        
+        Skips loading modalities that are not needed for the current ablation_mode (memory savings).
 
         Args:
             idx: Sample index.
 
         Returns:
             Dictionary with keys:
-            - 'input_ids': Token IDs (online mode) or 'text_emb' (offline mode)
-            - 'attention_mask': Attention mask (online mode) or omitted (offline mode)
-            - 'pixel_values': Image tensor (online mode) or 'image_emb' (offline mode)
-            - 'metadata': Metadata feature tensor, shape (9,)
+            - 'input_ids': Token IDs (online mode, if load_text=True) or omitted
+            - 'attention_mask': Attention mask (online mode, if load_text=True) or omitted
+            - 'pixel_values': Image tensor (online mode, if load_image=True) or omitted
+            - 'metadata': Metadata feature tensor, shape (N_features,) (if load_metadata=True) or omitted
             - 'label': Binary misinformation label, scalar
-            - 'missing_image': Boolean flag indicating if image was missing
+            - 'missing_image': Boolean flag indicating if image was missing (if load_image=True) or omitted
             - 'sample_id': Sample identifier string
         """
         row = self.df.iloc[idx]
-        # Use 'id' column from the CSV (not 'ad_id')
         sample_id = str(row.get("id", idx))
-        missing_image = False
 
         if self.use_offline_embeddings:
             # Offline embeddings mode
-            text_emb = torch.tensor(
-                self.text_embeddings[idx], dtype=torch.float32
-            )
-            image_emb = torch.tensor(
-                self.image_embeddings[idx], dtype=torch.float32
-            )
-
-            return {
-                "text_emb": text_emb,
-                "image_emb": image_emb,
-                "metadata": self._get_metadata(idx),
+            sample = {
                 "label": torch.tensor(float(row["misinformation"]), dtype=torch.float32),
-                "missing_image": False,
                 "sample_id": sample_id,
             }
+            
+            if self.load_text:
+                text_emb = torch.tensor(
+                    self.text_embeddings[idx], dtype=torch.float32
+                )
+                sample["text_emb"] = text_emb
+            
+            if self.load_image:
+                image_emb = torch.tensor(
+                    self.image_embeddings[idx], dtype=torch.float32
+                )
+                sample["image_emb"] = image_emb
+            
+            if self.load_metadata:
+                sample["metadata"] = self._get_metadata(idx)
+            
+            sample["missing_image"] = False
+            return sample
+            
         else:
-            # Online mode: tokenize text and load image
-            # Get text
-            text = str(row.get("ad_creative_body", ""))
-            encoding = self.tokenizer(
-                text,
-                max_length=256,
-                truncation=True,
-                padding="max_length",
-                return_tensors="pt",
-            )
-            input_ids = encoding["input_ids"].squeeze(0)
-            attention_mask = encoding["attention_mask"].squeeze(0)
-
-            # Get image
-            pixel_values = self._load_image(idx)
-            missing_image = pixel_values is None
-
-            if pixel_values is None:
-                # Return zero tensor if image missing
-                # Assuming image_size=224 and 3 channels
-                pixel_values = torch.zeros((3, 224, 224), dtype=torch.float32)
-
-            return {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "pixel_values": pixel_values,
-                "metadata": self._get_metadata(idx),
+            # Online mode: tokenize text and load image (if needed)
+            sample = {
                 "label": torch.tensor(
                     float(row["misinformation"]), dtype=torch.float32
                 ),
-                "missing_image": missing_image,
                 "sample_id": sample_id,
             }
+            
+            if self.load_text:
+                # Get text
+                text = str(row.get("ad_creative_body", ""))
+                encoding = self.tokenizer(
+                    text,
+                    max_length=256,
+                    truncation=True,
+                    padding="max_length",
+                    return_tensors="pt",
+                )
+                sample["input_ids"] = encoding["input_ids"].squeeze(0)
+                sample["attention_mask"] = encoding["attention_mask"].squeeze(0)
+            
+            if self.load_image:
+                # Get image
+                pixel_values = self._load_image(idx)
+                missing_image = pixel_values is None
+
+                if pixel_values is None:
+                    # Return zero tensor if image missing
+                    pixel_values = torch.zeros((3, 224, 224), dtype=torch.float32)
+                
+                sample["pixel_values"] = pixel_values
+                sample["missing_image"] = missing_image
+            else:
+                # Image not needed for this ablation
+                sample["missing_image"] = False
+            
+            if self.load_metadata:
+                sample["metadata"] = self._get_metadata(idx)
+            
+            return sample
 
     def _load_image(self, idx: int) -> Optional[torch.Tensor]:
         """
