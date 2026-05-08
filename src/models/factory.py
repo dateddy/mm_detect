@@ -5,9 +5,11 @@ The factory ensures that different ablation_mode values produce models with
 truly different architectures, not just zeroed-out inputs or disabled branches.
 """
 import logging
+import math
 from typing import Dict, Any
 
 import torch.nn as nn
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,8 @@ VALID_ABLATION_MODES = {
     "image_metadata",
     "full_no_contrastive",          # full architecture, contrastive_lambda=0
     "full_no_modality_dropout",     # full architecture, modality_dropout=0
+    "full_no_dropout",              # full architecture, nn.Dropout layers=0
+    "full_no_metadata_in_fusion",    # full architecture, metadata encoded but ignored in fusion
     "full_no_attention",            # full architecture without cross-attention
     "full_no_gating",               # full architecture with simple sum fusion
 }
@@ -58,8 +62,9 @@ def build_model(config: Dict[str, Any]) -> nn.Module:
     
     # Map mode to model class
     if mode in ("full", "full_no_contrastive", "full_no_modality_dropout",
+                "full_no_dropout", "full_no_metadata_in_fusion",
                 "full_no_attention", "full_no_gating"):
-        model = MultimodalMisinfoDetector(config)
+        model = MultimodalMisinfoDetector(config, ablation_mode=mode)
     elif mode == "text_only":
         model = TextOnlyModel(config)
     elif mode == "image_only":
@@ -77,11 +82,40 @@ def build_model(config: Dict[str, Any]) -> nn.Module:
     
     # Verify architecture matches the requested mode
     _verify_model_matches_mode(model, mode)
+    _initialize_classifier_prior_bias(model, config)
     
     # Log summary
     _log_model_summary(model, mode)
     
     return model
+
+
+def _initialize_classifier_prior_bias(model: nn.Module, config: Dict[str, Any]) -> None:
+    """Initialize the final binary classifier bias to the configured class prior."""
+    pos_rate = config.get("data", {}).get("estimated_pos_rate", 0.61)
+    pos_rate = min(max(float(pos_rate), 1e-4), 1.0 - 1e-4)
+    prior_bias = math.log(pos_rate / (1.0 - pos_rate))
+
+    classifier = getattr(model, "classifier", None)
+    if classifier is None:
+        return
+
+    final_linear = None
+    for module in classifier.modules():
+        if isinstance(module, nn.Linear) and module.out_features == 1:
+            final_linear = module
+
+    if final_linear is None or final_linear.bias is None:
+        logger.warning("Could not initialize classifier prior bias: final Linear(?, 1) not found")
+        return
+
+    with torch.no_grad():
+        final_linear.bias.fill_(prior_bias)
+
+    logger.info(
+        f"[ModelFactory] Classifier final bias initialized to {prior_bias:.4f} "
+        f"(matches prior={pos_rate:.4f})"
+    )
 
 
 def _verify_model_matches_mode(model: nn.Module, mode: str):
@@ -109,6 +143,8 @@ def _verify_model_matches_mode(model: nn.Module, mode: str):
         "full":                     {"text": True,  "image": True,  "meta": True,  "fusion": True},
         "full_no_contrastive":      {"text": True,  "image": True,  "meta": True,  "fusion": True},
         "full_no_modality_dropout": {"text": True,  "image": True,  "meta": True,  "fusion": True},
+        "full_no_dropout":          {"text": True,  "image": True,  "meta": True,  "fusion": True},
+        "full_no_metadata_in_fusion": {"text": True, "image": True, "meta": True, "fusion": True},
         "full_no_attention":        {"text": True,  "image": True,  "meta": True,  "fusion": True},
         "full_no_gating":           {"text": True,  "image": True,  "meta": True,  "fusion": True},
         "text_only":                {"text": True,  "image": False, "meta": False, "fusion": False},
@@ -160,6 +196,7 @@ def _log_model_summary(model: nn.Module, mode: str):
         ("meta_proj",        "Metadata Projection"),
         ("dual_cross_attn",  "Dual Cross-Attention"),
         ("gated_fusion",     "Gated Fusion"),
+        ("fusion_layer_norm", "Fusion LayerNorm"),
         ("classifier",       "Classifier Head"),
     ]
     
@@ -187,16 +224,18 @@ def expected_param_range(mode: str) -> tuple:
         Tuple of (min_params, max_params)
     """
     ranges = {
-        "full":                     (220_000_000, 224_000_000),
-        "full_no_contrastive":      (220_000_000, 224_000_000),
-        "full_no_modality_dropout": (220_000_000, 224_000_000),
-        "full_no_attention":        (219_000_000, 222_000_000),
-        "full_no_gating":           (220_000_000, 222_000_000),
-        "text_only":                (134_000_000, 137_000_000),
+        "full":                     (221_500_000, 223_500_000),
+        "full_no_contrastive":      (221_500_000, 223_500_000),
+        "full_no_modality_dropout": (221_500_000, 223_500_000),
+        "full_no_dropout":          (221_500_000, 223_500_000),
+        "full_no_metadata_in_fusion": (221_500_000, 223_500_000),
+        "full_no_attention":        (220_900_000, 222_900_000),
+        "full_no_gating":           (220_900_000, 222_900_000),
+        "text_only":                (134_500_000, 136_500_000),
         "image_only":               ( 85_000_000,  88_000_000),
-        "metadata_only":            (    400_000,     800_000),
-        "text_image":               (220_000_000, 222_000_000),
-        "text_metadata":            (135_000_000, 137_000_000),
+        "metadata_only":            (    140_000,     180_000),
+        "text_image":               (220_500_000, 222_000_000),
+        "text_metadata":            (134_500_000, 136_500_000),
         "image_metadata":           ( 85_000_000,  88_000_000),
     }
     return ranges.get(mode, (0, float('inf')))

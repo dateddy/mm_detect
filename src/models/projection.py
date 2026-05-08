@@ -25,21 +25,24 @@ class ModalityProjection(nn.Module):
         out_dim: Output projection dimension (default: 256)
     """
 
-    def __init__(self, in_dim: int, out_dim: int = 256):
+    def __init__(self, in_dim: int, out_dim: int = 256, dropout: float = 0.0):
         """
         Initialize ModalityProjection.
 
         Args:
             in_dim: Input embedding dimension.
             out_dim: Output projection dimension (default: 256).
+            dropout: Dropout probability after layer normalization.
         """
         super().__init__()
 
         self.in_dim = in_dim
         self.out_dim = out_dim
+        self.dropout_p = dropout
 
         self.linear = nn.Linear(in_dim, out_dim)
         self.layer_norm = nn.LayerNorm(out_dim)
+        self.dropout = nn.Dropout(dropout)
 
         logger.debug(f"Initialized ModalityProjection ({in_dim} → {out_dim})")
 
@@ -55,6 +58,7 @@ class ModalityProjection(nn.Module):
         """
         x = self.linear(x)
         x = self.layer_norm(x)
+        x = self.dropout(x)
         return x
 
 

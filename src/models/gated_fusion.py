@@ -52,7 +52,7 @@ class GatedFusion(nn.Module):
         self,
         t_prime: torch.Tensor,
         i_prime: torch.Tensor,
-        m_proj: torch.Tensor,
+        m_proj: torch.Tensor | None,
         t_proj: torch.Tensor,
         i_proj: torch.Tensor,
     ) -> torch.Tensor:
@@ -62,13 +62,18 @@ class GatedFusion(nn.Module):
         Args:
             t_prime: Text embeddings after cross-attention, shape (batch_size, 256).
             i_prime: Image embeddings after cross-attention, shape (batch_size, 256).
-            m_proj: Metadata embeddings (projected), shape (batch_size, 256).
+            m_proj: Optional metadata embeddings (projected), shape (batch_size, 256).
             t_proj: Original text embeddings (for residual), shape (batch_size, 256).
             i_proj: Original image embeddings (for residual), shape (batch_size, 256).
 
         Returns:
             Fused embeddings, shape (batch_size, 256).
         """
+        if m_proj is None:
+            # Parameter-controlled metadata ablation: keep the 3-way gate,
+            # but feed zero metadata so no metadata signal reaches fusion.
+            m_proj = torch.zeros_like(t_prime)
+
         # Step 1: Concatenate attended embeddings
         gate_input = torch.cat([t_prime, i_prime, m_proj], dim=-1)  # (B, 768)
 

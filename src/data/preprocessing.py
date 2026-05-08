@@ -268,6 +268,33 @@ def compute_class_weights(train_df: pd.DataFrame) -> torch.Tensor:
 
     return weights
 
+
+def compute_pos_weight(train_df: pd.DataFrame) -> float:
+    """
+    Compute the positive-class weight for BCEWithLogitsLoss.
+
+    PyTorch's pos_weight scales the positive term only. The class-balanced
+    setting is n_negative / n_positive, not the inverse.
+    """
+    if "misinformation" not in train_df.columns:
+        raise ValueError("DataFrame must have 'misinformation' column")
+
+    labels = train_df["misinformation"].astype(int)
+    n_pos = int((labels == 1).sum())
+    n_neg = int((labels == 0).sum())
+
+    if n_pos == 0:
+        raise ValueError("No positive labels in training data")
+    if n_neg == 0:
+        raise ValueError("No negative labels in training data")
+
+    pos_weight = n_neg / n_pos
+    logger.info(
+        f"[compute_pos_weight] n_pos={n_pos:,}, n_neg={n_neg:,}, "
+        f"pos_rate={n_pos / (n_pos + n_neg):.4f}, pos_weight={pos_weight:.4f}"
+    )
+    return float(pos_weight)
+
 # ============================================================================
 # TEXT PROCESSING HELPER FUNCTIONS
 # ============================================================================

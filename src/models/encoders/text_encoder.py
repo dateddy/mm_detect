@@ -34,7 +34,10 @@ class TextEncoder(nn.Module):
         
         # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(
+            model_name,
+            add_pooling_layer=False,
+        )
         
         if freeze_encoder:
             for param in self.model.parameters():

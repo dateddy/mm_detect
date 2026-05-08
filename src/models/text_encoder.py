@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,10 @@ class TextEncoder(nn.Module):
         super().__init__()
 
         self.model_name = model_name
-        self.model = AutoModel.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(
+            model_name,
+            add_pooling_layer=False,
+        )
         self.config = self.model.config
 
         if freeze:
@@ -44,7 +47,7 @@ class TextEncoder(nn.Module):
 
         logger.info(
             f"Initialized TextEncoder ({model_name}), "
-            f"output_dim={self.config.hidden_size}"
+            f"output_dim={self.config.hidden_size}, pooler=disabled"
         )
 
     def freeze_all(self) -> None:
@@ -100,13 +103,9 @@ class TextEncoder(nn.Module):
             for param in layer.parameters():
                 param.requires_grad = True
 
-        # Always unfreeze layer norm and pooler if they exist
+        # Always unfreeze layer norm if it exists.
         if hasattr(self.model, "encoder") and hasattr(self.model.encoder, "LayerNorm"):
             for param in self.model.encoder.LayerNorm.parameters():
-                param.requires_grad = True
-
-        if hasattr(self.model, "pooler"):
-            for param in self.model.pooler.parameters():
                 param.requires_grad = True
 
         logger.info(

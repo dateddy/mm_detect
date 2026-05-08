@@ -74,16 +74,19 @@ class AdDataset(Dataset):
         # === NEW: PROMPT 4 — Skip loading unused modalities based on ablation_mode ===
         self.load_text = ablation_mode in {
             "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_dropout", "full_no_metadata_in_fusion",
             "full_no_attention", "full_no_gating",
             "text_only", "text_image", "text_metadata",
         }
         self.load_image = ablation_mode in {
             "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_dropout", "full_no_metadata_in_fusion",
             "full_no_attention", "full_no_gating",
             "image_only", "text_image", "image_metadata",
         }
         self.load_metadata = ablation_mode in {
             "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_dropout", "full_no_metadata_in_fusion",
             "full_no_attention", "full_no_gating",
             "metadata_only", "text_metadata", "image_metadata",
         }
@@ -356,6 +359,7 @@ def create_datasets(
     image_transforms: Dict[str, object],
     metadata_cols: List[str],
     offline_embeddings_dir: Optional[str] = None,
+    ablation_mode: str = "full",
 ) -> tuple:
     """
     Create train, val, and test AdDataset instances.
@@ -386,6 +390,7 @@ def create_datasets(
         metadata_cols=metadata_cols,
         split="train",
         offline_embeddings_dir=offline_embeddings_dir,
+        ablation_mode=ablation_mode,
     )
 
     val_dataset = AdDataset(
@@ -396,6 +401,7 @@ def create_datasets(
         metadata_cols=metadata_cols,
         split="val",
         offline_embeddings_dir=offline_embeddings_dir,
+        ablation_mode=ablation_mode,
     )
 
     test_dataset = AdDataset(
@@ -406,6 +412,7 @@ def create_datasets(
         metadata_cols=metadata_cols,
         split="test",
         offline_embeddings_dir=offline_embeddings_dir,
+        ablation_mode=ablation_mode,
     )
 
     return train_dataset, val_dataset, test_dataset

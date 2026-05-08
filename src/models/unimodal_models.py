@@ -10,11 +10,11 @@ No dead code branches, no disabled encoders, no wasted components.
 """
 import torch
 import torch.nn as nn
-from transformers import AutoModel
 import timm
 from typing import Dict
 
 from .components import MetadataMLP
+from .text_encoder import TextEncoder
 
 
 class TextOnlyModel(nn.Module):
@@ -36,14 +36,12 @@ class TextOnlyModel(nn.Module):
         
         # === Text Encoder (PhoBERT) ===
         text_model_name = cfg_model.get("text_model_name", "vinai/phobert-base-v2")
-        self.text_encoder = AutoModel.from_pretrained(text_model_name)
-        text_dim = self.text_encoder.config.hidden_size  # 768
-        
-        # Freeze in Phase 1
         freeze_epochs = cfg_train.get("freeze_encoder_epochs", 0)
-        if freeze_epochs > 0:
-            for p in self.text_encoder.parameters():
-                p.requires_grad = False
+        self.text_encoder = TextEncoder(
+            model_name=text_model_name,
+            freeze=freeze_epochs > 0,
+        )
+        text_dim = self.text_encoder.output_dim  # 768
         
         # === Text Projection ===
         proj_dim = cfg_model.get("projection_dim", 256)
@@ -77,15 +75,10 @@ class TextOnlyModel(nn.Module):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for text-only model."""
         # === Text path only ===
-        text_out = self.text_encoder(
+        text_repr = self.text_encoder(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
         )
-        # [CLS] token from pooler or first hidden state
-        if hasattr(text_out, "pooler_output") and text_out.pooler_output is not None:
-            text_repr = text_out.pooler_output  # [B, 768]
-        else:
-            text_repr = text_out.last_hidden_state[:, 0, :]  # [B, 768]
         
         t_proj = self.text_proj(text_repr)  # [B, 256]
         
@@ -99,7 +92,8 @@ class TextOnlyModel(nn.Module):
     
     def transition_to_phase2(self, k: int = 4):
         """Unfreeze top-k blocks of PhoBERT."""
-        text_blocks = self.text_encoder.encoder.layer
+        self.text_encoder.unfreeze_top_k(k)
+        text_blocks = self.text_encoder.model.encoder.layer
         params = []
         for block in text_blocks[-k:]:
             for p in block.parameters():

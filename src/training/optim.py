@@ -50,12 +50,14 @@ def build_optimizer_phase1(model, loss_fn, config: dict) -> Tuple[AdamW, Dict[st
         Group 4: learnable temperature (active in Phase 1 and Phase 2)
     """
     # ===== VERIFICATION: Encoders are actually frozen =====
-    text_frozen = all(not p.requires_grad for p in model.text_encoder.parameters())
-    image_frozen = all(not p.requires_grad for p in model.image_encoder.parameters())
+    text_frozen = (model.text_encoder is None or 
+                   all(not p.requires_grad for p in model.text_encoder.parameters()))
+    image_frozen = (model.image_encoder is None or 
+                    all(not p.requires_grad for p in model.image_encoder.parameters()))
     
-    if not text_frozen:
+    if model.text_encoder is not None and not text_frozen:
         logger.warning("[build_optimizer_phase1] text_encoder is not frozen, proceeding anyway")
-    if not image_frozen:
+    if model.image_encoder is not None and not image_frozen:
         logger.warning("[build_optimizer_phase1] image_encoder is not frozen, proceeding anyway")
     
     # ===== COLLECT TRAINABLE PARAMETERS BY COMPONENT =====
@@ -93,15 +95,21 @@ def build_optimizer_phase1(model, loss_fn, config: dict) -> Tuple[AdamW, Dict[st
     
     # ===== COLLECT LEARNABLE TEMPERATURE PARAMETER =====
     temperature_params = []
-    if hasattr(loss_fn, "contrastive") and hasattr(loss_fn.contrastive, "logit_scale"):
-        logit_scale = loss_fn.contrastive.logit_scale
-        if logit_scale.requires_grad:
-            temperature_params.append(logit_scale)
-            init_temp = loss_fn.contrastive.temperature.item()
-            logger.info(
-                f"[Phase 1 Optimizer] Found learnable temperature: "
-                f"logit_scale={logit_scale.item():.4f}, init_temp={init_temp:.4f}"
-            )
+    contrastive_module = getattr(loss_fn, "contrastive_loss", None)
+    if (
+        getattr(loss_fn, "_has_contrastive", False)
+        and contrastive_module is not None
+    ):
+        for name, param in contrastive_module.named_parameters():
+            if param.requires_grad:
+                temperature_params.append(param)
+                logger.info(
+                    f"[Phase 1 Optimizer] Found learnable temperature: "
+                    f"{name}={param.item():.4f}, "
+                    f"init_temp={contrastive_module.temperature.item():.4f}"
+                )
+    else:
+        logger.info("[Phase 1 Optimizer] Contrastive disabled - no temperature param")
     
     # ===== LOGGING: Parameter counts by component =====
     n_fusion = sum(p.numel() for p in fusion_head_params)
@@ -142,14 +150,17 @@ def build_optimizer_phase1(model, loss_fn, config: dict) -> Tuple[AdamW, Dict[st
             "weight_decay": 0.0,  # No weight decay on classifier biases
             "name": "classifier",
         },
-        # Group 4: learnable temperature (active in Phase 1 and Phase 2)
-        {
-            "params": temperature_params,
-            "lr": config["training"].get("lr_fusion", 3.0e-4),
-            "weight_decay": 0.0,  # No weight decay on scalar parameter
-            "name": "temperature",
-        },
     ]
+
+    if temperature_params:
+        param_groups.append(
+            {
+                "params": temperature_params,
+                "lr": config["training"].get("lr_fusion", 3.0e-4),
+                "weight_decay": 0.0,  # No weight decay on scalar parameter
+                "name": "temperature",
+            }
+        )
     
     # ===== CREATE OPTIMIZER =====
     optimizer = AdamW(
@@ -169,11 +180,8 @@ def build_optimizer_phase1(model, loss_fn, config: dict) -> Tuple[AdamW, Dict[st
         "classifier group should have parameters in Phase 1"
     
     logger.info(
-        f"[Phase 1 Optimizer] Created with 5 groups: "
-        f"text_encoder (empty), image_encoder (empty), "
-        f"fusion ({len(optimizer.param_groups[2]['params'])}), "
-        f"classifier ({len(optimizer.param_groups[3]['params'])}), "
-        f"temperature ({len(optimizer.param_groups[4]['params'])})"
+        f"[Phase 1 Optimizer] Created with {len(optimizer.param_groups)} groups: "
+        f"{[group['name'] for group in optimizer.param_groups]}"
     )
     
     return optimizer, param_group_index

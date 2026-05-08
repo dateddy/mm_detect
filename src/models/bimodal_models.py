@@ -11,11 +11,11 @@ Models:
 """
 import torch
 import torch.nn as nn
-from transformers import AutoModel
 import timm
 from typing import Dict
 
 from .components import MetadataMLP
+from .text_encoder import TextEncoder
 
 
 class _BimodalBase(nn.Module):
@@ -68,12 +68,11 @@ class TextImageModel(_BimodalBase):
         freeze_epochs = cfg_train.get("freeze_encoder_epochs", 0)
         
         # === Text Encoder (PhoBERT) ===
-        self.text_encoder = AutoModel.from_pretrained(text_model_name)
-        text_dim = self.text_encoder.config.hidden_size
-        
-        if freeze_epochs > 0:
-            for p in self.text_encoder.parameters():
-                p.requires_grad = False
+        self.text_encoder = TextEncoder(
+            model_name=text_model_name,
+            freeze=freeze_epochs > 0,
+        )
+        text_dim = self.text_encoder.output_dim
         
         # === Image Encoder (ViT-B/16) ===
         self.image_encoder = timm.create_model(
@@ -116,12 +115,10 @@ class TextImageModel(_BimodalBase):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for text+image model."""
         # Text encoding
-        text_out = self.text_encoder(
+        text_repr = self.text_encoder(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
         )
-        text_repr = (text_out.pooler_output if hasattr(text_out, "pooler_output") and text_out.pooler_output is not None
-                     else text_out.last_hidden_state[:, 0, :])
         t_proj = self.text_proj(text_repr)
         
         # Image encoding
@@ -145,7 +142,8 @@ class TextImageModel(_BimodalBase):
         params = []
         
         # Unfreeze text encoder blocks
-        text_blocks = self.text_encoder.encoder.layer
+        self.text_encoder.unfreeze_top_k(k)
+        text_blocks = self.text_encoder.model.encoder.layer
         for block in text_blocks[-k:]:
             for p in block.parameters():
                 p.requires_grad = True
@@ -196,12 +194,11 @@ class TextMetadataModel(_BimodalBase):
         n_metadata_features = len(metadata_features) if metadata_features else 17
         
         # === Text Encoder (PhoBERT) ===
-        self.text_encoder = AutoModel.from_pretrained(text_model_name)
-        text_dim = self.text_encoder.config.hidden_size
-        
-        if freeze_epochs > 0:
-            for p in self.text_encoder.parameters():
-                p.requires_grad = False
+        self.text_encoder = TextEncoder(
+            model_name=text_model_name,
+            freeze=freeze_epochs > 0,
+        )
+        text_dim = self.text_encoder.output_dim
         
         # === Metadata Encoder (MLP) ===
         self.metadata_encoder = MetadataMLP(
@@ -240,12 +237,10 @@ class TextMetadataModel(_BimodalBase):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for text+metadata model."""
         # Text encoding
-        text_out = self.text_encoder(
+        text_repr = self.text_encoder(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
         )
-        text_repr = (text_out.pooler_output if hasattr(text_out, "pooler_output") and text_out.pooler_output is not None
-                     else text_out.last_hidden_state[:, 0, :])
         t_proj = self.text_proj(text_repr)
         
         # Metadata encoding
@@ -269,7 +264,8 @@ class TextMetadataModel(_BimodalBase):
         params = []
         
         # Unfreeze text encoder blocks
-        text_blocks = self.text_encoder.encoder.layer
+        self.text_encoder.unfreeze_top_k(k)
+        text_blocks = self.text_encoder.model.encoder.layer
         for block in text_blocks[-k:]:
             for p in block.parameters():
                 p.requires_grad = True

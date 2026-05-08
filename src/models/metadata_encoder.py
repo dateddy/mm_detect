@@ -38,6 +38,7 @@ class MetadataEncoder(nn.Module):
         input_dim: int = 13,
         output_dim: int = 256,
         hidden_dims: list | None = None,
+        dropout: float = 0.1,
     ):
         """
         Initialize MetadataEncoder with gradual expansion.
@@ -56,6 +57,7 @@ class MetadataEncoder(nn.Module):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dims = hidden_dims
+        self.dropout_p = dropout
 
         # Build sequential network with gradual expansion
         layers = []
@@ -65,7 +67,7 @@ class MetadataEncoder(nn.Module):
             nn.Linear(input_dim, hidden_dims[0]),
             nn.BatchNorm1d(hidden_dims[0]),
             nn.GELU(),
-            nn.Dropout(0.1),  # Light dropout on tabular features
+            nn.Dropout(dropout),  # Light dropout on tabular features
         ])
 
         # Intermediate layers: hidden → hidden
@@ -74,7 +76,7 @@ class MetadataEncoder(nn.Module):
                 nn.Linear(hidden_dims[i], hidden_dims[i + 1]),
                 nn.BatchNorm1d(hidden_dims[i + 1]),
                 nn.GELU(),
-                nn.Dropout(0.1),
+                nn.Dropout(dropout),
             ])
 
         # Final layer: last hidden → output_dim (no dropout on projection layer)

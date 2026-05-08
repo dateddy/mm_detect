@@ -58,12 +58,16 @@ class MultimodalMisinfoDetector(nn.Module):
                 - 'full': Multimodal (default)
                 - 'text_only': Text modality only
                 - 'image_only': Image modality only
-                - 'metadata_only': Metadata modality only
+                - full_no_*: Full architecture component/loss ablations
         """
         super().__init__()
 
         # Validate ablation mode
-        valid_modes = {"full", "text_only", "image_only", "metadata_only"}
+        valid_modes = {
+            "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_dropout", "full_no_metadata_in_fusion",
+            "full_no_attention", "full_no_gating",
+        }
         if ablation_mode not in valid_modes:
             raise ValueError(f"ablation_mode must be one of {valid_modes}, got {ablation_mode}")
         self.ablation_mode = ablation_mode
@@ -71,15 +75,31 @@ class MultimodalMisinfoDetector(nn.Module):
         logger.info(f"Initializing MultimodalMisinfoDetector in '{ablation_mode}' mode...")
 
         # Extract config parameters
-        text_encoder_name = config.get("text_encoder_name", "vinai/phobert-base-v2")
-        image_encoder_name = config.get(
-            "image_encoder_name", "vit_base_patch16_224"
+        cfg_model = config.get("model", {})
+        cfg_training = config.get("training", {})
+        text_encoder_name = cfg_model.get(
+            "text_model_name", config.get("text_encoder_name", "vinai/phobert-base-v2")
         )
-        proj_dim = config.get("proj_dim", 256)
-        num_attn_heads = config.get("num_attn_heads", 8)
-        attn_dropout = config.get("attn_dropout", 0.1)
-        modality_dropout_p = config.get("modality_dropout_p", 0.15)
-        head_dropout = config.get("head_dropout", 0.3)
+        image_encoder_name = cfg_model.get(
+            "image_model_name", config.get("image_encoder_name", "vit_base_patch16_224")
+        )
+        proj_dim = cfg_model.get("projection_dim", config.get("proj_dim", 256))
+        num_attn_heads = cfg_model.get("num_attn_heads", config.get("num_attn_heads", 8))
+        proj_dropout = cfg_model.get("projection_dropout", config.get("projection_dropout", 0.1))
+        attn_dropout = cfg_model.get("attention_dropout", config.get("attn_dropout", 0.1))
+        modality_dropout_p = cfg_training.get(
+            "modality_dropout", config.get("modality_dropout_p", 0.15)
+        )
+        head_dropout = cfg_model.get("classifier_dropout", config.get("head_dropout", 0.3))
+
+        if self.ablation_mode == "full_no_dropout":
+            logger.info(
+                "[MultimodalMisinfoDetector] mode='full_no_dropout': "
+                "forcing all nn.Dropout layers to 0.0"
+            )
+            proj_dropout = 0.0
+            attn_dropout = 0.0
+            head_dropout = 0.0
         
         # Store proj_dim for later use
         self.proj_dim = proj_dim
@@ -102,39 +122,73 @@ class MultimodalMisinfoDetector(nn.Module):
         self.num_metadata_features = num_metadata_features
         if num_metadata_features > 0:
             self.metadata_encoder = MetadataEncoder(
-                input_dim=num_metadata_features, output_dim=proj_dim
+                input_dim=num_metadata_features,
+                output_dim=proj_dim,
+                dropout=proj_dropout,
             )
         else:
             self.metadata_encoder = None
 
         # Projection layers (to common dimension)
         self.text_proj = ModalityProjection(
-            in_dim=self.text_encoder.output_dim, out_dim=proj_dim
+            in_dim=self.text_encoder.output_dim,
+            out_dim=proj_dim,
+            dropout=proj_dropout,
         )
         self.image_proj = ModalityProjection(
-            in_dim=self.image_encoder.output_dim, out_dim=proj_dim
+            in_dim=self.image_encoder.output_dim,
+            out_dim=proj_dim,
+            dropout=proj_dropout,
         )
         self.meta_proj = ModalityProjection(
-            in_dim=proj_dim, out_dim=proj_dim
+            in_dim=proj_dim,
+            out_dim=proj_dim,
+            dropout=proj_dropout,
         )
 
         # Modality dropout
         self.modality_dropout = ModalityDropout(p=modality_dropout_p)
 
-        # Dual cross-attention
-        self.dual_cross_attn = DualCrossAttention(
-            embed_dim=proj_dim,
-            num_heads=num_attn_heads,
-            dropout=attn_dropout,
-        )
+        # Dual cross-attention, removed entirely for the no-attention ablation.
+        if self.ablation_mode == "full_no_attention":
+            self.dual_cross_attn = None
+            logger.info(
+                "[MultimodalMisinfoDetector] mode='full_no_attention': "
+                "DualCrossAttention NOT instantiated"
+            )
+        else:
+            self.dual_cross_attn = DualCrossAttention(
+                embed_dim=proj_dim,
+                num_heads=num_attn_heads,
+                dropout=attn_dropout,
+            )
 
-        # Gated fusion
-        self.gated_fusion = GatedFusion(dim=proj_dim)
+        # Gated fusion, or parameter-free sum fusion for the no-gating ablation.
+        if self.ablation_mode == "full_no_gating":
+            self.gated_fusion = None
+            self.fusion_layer_norm = nn.LayerNorm(proj_dim)
+            logger.info(
+                "[MultimodalMisinfoDetector] mode='full_no_gating': "
+                "GatedFusion replaced with simple sum + LayerNorm"
+            )
+        else:
+            self.gated_fusion = GatedFusion(dim=proj_dim)
+            self.fusion_layer_norm = None
 
         # Classification head
         self.classifier = ClassificationHead(
             in_dim=proj_dim, dropout=head_dropout
         )
+
+        if self.ablation_mode == "full_no_dropout":
+            n_dropout = 0
+            for module in self.modules():
+                if isinstance(module, nn.Dropout):
+                    module.p = 0.0
+                    n_dropout += 1
+            logger.info(
+                f"[MultimodalMisinfoDetector] Set {n_dropout} nn.Dropout layers to p=0.0"
+            )
 
         logger.info(
             f"Initialized MultimodalMisinfoDetector with {self.count_parameters()} total parameters"
@@ -248,6 +302,7 @@ class MultimodalMisinfoDetector(nn.Module):
         # === ABLATION LOGIC: Handle different modes ===
         is_multimodal = self.ablation_mode in (
             "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_dropout", "full_no_metadata_in_fusion",
             "full_no_attention", "full_no_gating"
         )
         
@@ -258,14 +313,20 @@ class MultimodalMisinfoDetector(nn.Module):
             if self.ablation_mode == "full_no_attention":
                 # No cross-attention: use projections directly
                 t_prime, i_prime = t_proj, i_proj
+            elif self.ablation_mode == "full_no_metadata_in_fusion":
+                # Encode metadata for diagnostics/param control, but exclude it from attention.
+                t_prime, i_prime = self.dual_cross_attn(t_proj, i_proj, m_proj=None)
             else:
                 # Standard cross-attention
                 t_prime, i_prime = self.dual_cross_attn(t_proj, i_proj, m_proj)
             
             # Fusion (skip gating if full_no_gating mode, use simple sum instead)
             if self.ablation_mode == "full_no_gating":
-                # Simple sum fusion instead of gated
+                # Simple sum fusion with the same residual sources, then normalize.
                 fused = t_prime + i_prime + m_proj
+                fused = self.fusion_layer_norm(fused + t_proj + i_proj + m_proj)
+            elif self.ablation_mode == "full_no_metadata_in_fusion":
+                fused = self.gated_fusion(t_prime, i_prime, None, t_proj, i_proj)
             else:
                 # Standard gated fusion
                 fused = self.gated_fusion(t_prime, i_prime, m_proj, t_proj, i_proj)
@@ -290,8 +351,21 @@ class MultimodalMisinfoDetector(nn.Module):
 
         return {
             "logits": logits,
-            "t_proj": t_proj if self.ablation_mode in ("full", "text_only") else None,
-            "i_proj": i_proj if self.ablation_mode in ("full", "image_only") else None,
+            "t_proj": t_proj if self.ablation_mode in (
+                "full", "full_no_contrastive", "full_no_modality_dropout",
+                "full_no_dropout", "full_no_metadata_in_fusion",
+                "full_no_attention", "full_no_gating", "text_only"
+            ) else None,
+            "i_proj": i_proj if self.ablation_mode in (
+                "full", "full_no_contrastive", "full_no_modality_dropout",
+                "full_no_dropout", "full_no_metadata_in_fusion",
+                "full_no_attention", "full_no_gating", "image_only"
+            ) else None,
+            "m_proj": m_proj if self.ablation_mode in (
+                "full", "full_no_contrastive", "full_no_modality_dropout",
+                "full_no_dropout", "full_no_metadata_in_fusion",
+                "full_no_attention", "full_no_gating", "metadata_only"
+            ) else None,
             "t_prime": t_prime,  # None in unimodal modes
             "i_prime": i_prime,  # None in unimodal modes
             "image_valid": i_valid if is_multimodal else None,  # None in unimodal modes

@@ -63,7 +63,10 @@ class DualCrossAttention(nn.Module):
         )
 
     def forward(
-        self, t_proj: torch.Tensor, i_proj: torch.Tensor, m_proj: torch.Tensor
+        self,
+        t_proj: torch.Tensor,
+        i_proj: torch.Tensor,
+        m_proj: torch.Tensor | None = None,
     ) -> tuple:
         """
         Apply bidirectional cross-attention.
@@ -71,20 +74,21 @@ class DualCrossAttention(nn.Module):
         Args:
             t_proj: Text embeddings, shape (batch_size, 256).
             i_proj: Image embeddings, shape (batch_size, 256).
-            m_proj: Metadata embeddings, shape (batch_size, 256).
+            m_proj: Optional metadata embeddings, shape (batch_size, 256).
 
         Returns:
             Tuple of (t_prime, i_prime) where:
-            - t_prime: Text after attending to Image+Metadata, shape (batch_size, 256)
-            - i_prime: Image after attending to Text+Metadata, shape (batch_size, 256)
+            - t_prime: Text after attending to Image(+Metadata), shape (batch_size, 256)
+            - i_prime: Image after attending to Text(+Metadata), shape (batch_size, 256)
         """
-        batch_size = t_proj.shape[0]
-
         # Branch A: Text → Image + Metadata
         #   Query: Text (B, 1, 256)
         #   Key/Value: [Image, Metadata] (B, 2, 256)
         q_text = t_proj.unsqueeze(1)  # (B, 1, 256)
-        kv_image_metadata = torch.stack([i_proj, m_proj], dim=1)  # (B, 2, 256)
+        if m_proj is None:
+            kv_image_metadata = i_proj.unsqueeze(1)  # (B, 1, 256)
+        else:
+            kv_image_metadata = torch.stack([i_proj, m_proj], dim=1)  # (B, 2, 256)
 
         t_prime, _ = self.attn_text_to_image(
             q_text, kv_image_metadata, kv_image_metadata
@@ -95,7 +99,10 @@ class DualCrossAttention(nn.Module):
         #   Query: Image (B, 1, 256)
         #   Key/Value: [Text, Metadata] (B, 2, 256)
         q_image = i_proj.unsqueeze(1)  # (B, 1, 256)
-        kv_text_metadata = torch.stack([t_proj, m_proj], dim=1)  # (B, 2, 256)
+        if m_proj is None:
+            kv_text_metadata = t_proj.unsqueeze(1)  # (B, 1, 256)
+        else:
+            kv_text_metadata = torch.stack([t_proj, m_proj], dim=1)  # (B, 2, 256)
 
         i_prime, _ = self.attn_image_to_text(
             q_image, kv_text_metadata, kv_text_metadata

@@ -35,35 +35,36 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not batch:
         raise ValueError("Batch cannot be empty")
 
-    # Detect mode from first sample
-    is_offline = "text_emb" in batch[0]
-
     batched = {}
 
-    if is_offline:
-        # Offline embeddings mode: Stack text_emb and image_emb
+    if "text_emb" in batch[0]:
         batched["text_emb"] = torch.stack(
             [sample["text_emb"] for sample in batch], dim=0
         )
+
+    if "image_emb" in batch[0]:
         batched["image_emb"] = torch.stack(
             [sample["image_emb"] for sample in batch], dim=0
         )
-    else:
-        # Online mode: Stack input_ids, attention_mask, pixel_values
+
+    if "input_ids" in batch[0]:
         batched["input_ids"] = torch.stack(
             [sample["input_ids"] for sample in batch], dim=0
         )
         batched["attention_mask"] = torch.stack(
             [sample["attention_mask"] for sample in batch], dim=0
         )
+
+    if "pixel_values" in batch[0]:
         batched["pixel_values"] = torch.stack(
             [sample["pixel_values"] for sample in batch], dim=0
         )
 
     # Stack metadata features
-    batched["metadata"] = torch.stack(
-        [sample["metadata"] for sample in batch], dim=0
-    )
+    if "metadata" in batch[0]:
+        batched["metadata"] = torch.stack(
+            [sample["metadata"] for sample in batch], dim=0
+        )
 
     # Stack labels
     batched["label"] = torch.stack([sample["label"] for sample in batch], dim=0)

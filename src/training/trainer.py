@@ -12,7 +12,7 @@ import yaml
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader
 
-from src.evaluation.metrics import compute_all_metrics, log_metrics_to_file
+from src.evaluation.metrics import compute_all_metrics, find_best_threshold, log_metrics_to_file
 from src.losses.combined_loss import CombinedLoss
 from src.models.full_model import MultimodalMisinfoDetector
 from src.training.early_stopping import EarlyStopping
@@ -139,13 +139,20 @@ class Trainer:
             and self.model.metadata_encoder is not None
         )
         
-        n_modalities = sum([self._has_text, self._has_image, self._has_metadata])
+        n_modalities = self._count_modalities()
         
         # Get configured modality dropout
         configured_dropout = self.config["training"].get("modality_dropout", 0.0)
         
-        # Auto-zero modality dropout if only one modality
-        if n_modalities < 2 and configured_dropout > 0:
+        ablation_mode = self.config.get("ablation_mode", getattr(self.model, "ablation_mode", "full"))
+
+        if ablation_mode == "full_no_modality_dropout":
+            self.modality_dropout = 0.0
+            self.logger.info(
+                f"[Trainer] mode='full_no_modality_dropout': "
+                f"modality dropout DISABLED (was {configured_dropout})"
+            )
+        elif n_modalities < 2 and configured_dropout > 0:
             self.logger.warning(
                 f"[Trainer] Model has only {n_modalities} modality (text={self._has_text}, "
                 f"image={self._has_image}, meta={self._has_metadata}). "
@@ -160,6 +167,10 @@ class Trainer:
             f"[Trainer] Modalities detected: text={self._has_text}, image={self._has_image}, "
             f"meta={self._has_metadata} ({n_modalities} total) | modality_dropout={self.modality_dropout}"
         )
+
+    def _count_modalities(self) -> int:
+        """Count active modalities in the model."""
+        return sum([self._has_text, self._has_image, self._has_metadata])
 
     def apply_modality_dropout(self, batch: dict) -> dict:
         """
@@ -188,15 +199,19 @@ class Trainer:
         # For each sample, decide if modality dropout happens
         drop_mask = torch.rand(B, device=device) < self.modality_dropout  # [B] bool
         
-        # Collect droppable modalities
+        # Collect droppable modalities based on available batch keys
         droppable = []
-        if self._has_text:
+        has_text_keys = "input_ids" in batch and "attention_mask" in batch
+        has_image_keys = "pixel_values" in batch
+        
+        if self._has_text and has_text_keys:
             droppable.append("text")
-        if self._has_image:
+        if self._has_image and has_image_keys:
             droppable.append("image")
         # metadata is never dropped (it's always small structured features)
         
         if len(droppable) == 0:
+            # No modalities to drop (missing keys), mark all as valid
             batch["valid_mask"] = torch.ones(B, dtype=torch.bool, device=device)
             return batch
         
@@ -210,13 +225,16 @@ class Trainer:
             
             if modality == "text":
                 # Zero out text by setting input_ids to 0 and keeping only [CLS]
-                batch["input_ids"][mask_i] = 0
-                batch["attention_mask"][mask_i] = 0
-                batch["attention_mask"][mask_i, 0] = 1  # keep [CLS] token
+                if "input_ids" in batch:
+                    batch["input_ids"][mask_i] = 0
+                if "attention_mask" in batch:
+                    batch["attention_mask"][mask_i] = 0
+                    batch["attention_mask"][mask_i, 0] = 1  # keep [CLS] token
                 
             elif modality == "image":
                 # Zero out image
-                batch["pixel_values"][mask_i] = 0.0
+                if "pixel_values" in batch:
+                    batch["pixel_values"][mask_i] = 0.0
         
         # valid_mask: True if NO modality was dropped for this sample
         # Used by contrastive loss to skip samples with dropped modalities
@@ -360,6 +378,9 @@ class Trainer:
         total_cosine_sim = 0.0
         total_temperature = 0.0
         num_batches = 0
+        contrastive_active = getattr(self.criterion, "_has_contrastive", False)
+        n_dropped_total = 0
+        n_samples_total = 0
 
         for batch_idx, batch in enumerate(self.train_loader):
             # Move batch to device
@@ -367,6 +388,10 @@ class Trainer:
             
             # === NEW: PROMPT 4 — Apply modality dropout ===
             batch = self.apply_modality_dropout(batch)
+            valid_mask = batch.get("valid_mask")
+            if valid_mask is not None:
+                n_dropped_total += (~valid_mask).sum().item()
+                n_samples_total += valid_mask.shape[0]
 
             # Forward pass with mixed precision
             if self.mixed_precision:
@@ -377,7 +402,11 @@ class Trainer:
                         labels=batch["label"].to(self.device),
                         text_emb=output["t_proj"],        # Can be None in unimodal modes
                         image_emb=output["i_proj"],        # Can be None in unimodal modes
-                        valid_mask=output["image_valid"],  # Exclude dropout-zeroed images (None in unimodal)
+                        valid_mask=(
+                            output["image_valid"]
+                            if output["image_valid"] is not None
+                            else batch.get("valid_mask")
+                        ),
                         is_multimodal=output["is_multimodal"],  # Flag for ablation mode
                     )
                     loss = loss_dict["loss"]
@@ -392,7 +421,11 @@ class Trainer:
                     labels=batch["label"].to(self.device),
                     text_emb=output["t_proj"],        # Can be None in unimodal modes
                     image_emb=output["i_proj"],        # Can be None in unimodal modes
-                    valid_mask=output["image_valid"],  # Exclude dropout-zeroed images (None in unimodal)
+                    valid_mask=(
+                        output["image_valid"]
+                        if output["image_valid"] is not None
+                        else batch.get("valid_mask")
+                    ),
                     is_multimodal=output["is_multimodal"],  # Flag for ablation mode
                 )
                 loss = loss_dict["loss"]
@@ -406,13 +439,15 @@ class Trainer:
                     t_n = torch.nn.functional.normalize(t, dim=-1, eps=1e-8)
                     i_n = torch.nn.functional.normalize(i, dim=-1, eps=1e-8)
                     cos_sim = (t_n * i_n).sum(dim=-1)
-                    self.logger.info(
+                    diag_msg = (
                         f"[Diag] t_proj norm: {t.norm(dim=-1).mean():.4f} | "
                         f"i_proj norm: {i.norm(dim=-1).mean():.4f} | "
                         f"cos_sim: mean={cos_sim.mean():.4f} std={cos_sim.std():.4f} | "
-                        f"t_proj std: {t.std():.6f} | i_proj std: {i.std():.6f} | "
-                        f"τ={loss_dict.get('temperature', torch.tensor(0)).item():.4f}"
+                        f"t_proj std: {t.std():.6f} | i_proj std: {i.std():.6f}"
                     )
+                    if contrastive_active and loss_dict.get("temperature") is not None:
+                        diag_msg += f" | tau={loss_dict['temperature'].item():.4f}"
+                    self.logger.info(diag_msg)
 
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(
@@ -434,17 +469,17 @@ class Trainer:
             # Accumulate losses
             total_loss += loss.item()
             total_cls_loss += loss_dict["cls_loss"].item()
-            if output["is_multimodal"] and loss_dict["con_loss"] is not None:
+            if contrastive_active and output["is_multimodal"] and loss_dict["con_loss"] is not None:
                 total_con_loss += loss_dict["con_loss"].item()
-            if output["is_multimodal"] and loss_dict.get("temperature") is not None:
+            if contrastive_active and output["is_multimodal"] and loss_dict.get("temperature") is not None:
                 total_temperature += loss_dict.get("temperature", torch.tensor(0.0)).item()
             num_batches += 1
 
             if (batch_idx + 1) % max(1, len(self.train_loader) // 5) == 0:
                 log_msg = f"[Epoch {epoch+1}] Batch {batch_idx+1}/{len(self.train_loader)} | Loss: {total_loss/num_batches:.6f}"
-                if output["is_multimodal"] and num_batches > 0:
+                if contrastive_active and output["is_multimodal"] and num_batches > 0:
                     avg_temp = total_temperature / num_batches
-                    log_msg += f" | τ={avg_temp:.4f}"
+                    log_msg += f" | tau={avg_temp:.4f}"
                 self.logger.info(log_msg)
 
         mean_loss = total_loss / num_batches
@@ -453,16 +488,34 @@ class Trainer:
         mean_cosine_sim = total_cosine_sim / num_batches
         mean_temperature = total_temperature / num_batches if num_batches > 0 else 0.0
 
+        if n_samples_total > 0:
+            actual_drop_rate = n_dropped_total / n_samples_total
+            self.logger.info(
+                f"[Epoch {epoch+1}] Modality dropout: configured={self.modality_dropout:.2f}, "
+                f"actual={actual_drop_rate:.3f} "
+                f"({n_dropped_total}/{n_samples_total} samples)"
+            )
+
         # Conditional logging: only log multimodal metrics if in multimodal mode
         # Determine mode from first batch's output (all batches use same mode)
-        is_multimodal_mode = self.model.ablation_mode == "full"
+        is_multimodal_mode = self.model.ablation_mode in {
+            "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_dropout", "full_no_metadata_in_fusion",
+            "full_no_attention", "full_no_gating",
+        }
         
-        if is_multimodal_mode:
+        if is_multimodal_mode and contrastive_active:
             self.logger.info(
                 f"[Epoch {epoch+1}] Train Loss: {mean_loss:.6f} "
                 f"(cls={mean_cls_loss:.6f}, con={mean_con_loss:.6f}) | "
                 f"Mean intra-batch cosine sim: {mean_cosine_sim:.4f} | "
-                f"final τ={mean_temperature:.4f}"
+                f"final tau={mean_temperature:.4f}"
+            )
+        elif is_multimodal_mode:
+            self.logger.info(
+                f"[Epoch {epoch+1}] Train Loss: {mean_loss:.6f} "
+                f"(cls={mean_cls_loss:.6f}) | "
+                f"Mean intra-batch cosine sim: {mean_cosine_sim:.4f}"
             )
         else:
             self.logger.info(
@@ -511,16 +564,26 @@ class Trainer:
         # Convert logits to probabilities via sigmoid
         proba_np = 1.0 / (1.0 + np.exp(-logits_np))
 
-        # Compute metrics
-        metrics = compute_all_metrics(labels_np, proba_np, threshold=0.5)
+        # Compute threshold-independent and threshold-tuned metrics.
+        metrics_at_05 = compute_all_metrics(labels_np, proba_np, threshold=0.5)
+        best_threshold = find_best_threshold(labels_np, proba_np, metric="f1_macro")
+        metrics = compute_all_metrics(labels_np, proba_np, threshold=best_threshold)
+        metrics["f1_macro_at_05"] = metrics_at_05["f1_macro"]
+        metrics["accuracy_at_05"] = metrics_at_05["accuracy"]
+        metrics["best_threshold"] = best_threshold
         
-        # Add per-class metrics
-        per_class_metrics = self._compute_per_class_metrics(labels_np, proba_np)
+        # Add per-class metrics at the tuned threshold.
+        per_class_metrics = self._compute_per_class_metrics(
+            labels_np, proba_np, threshold=best_threshold
+        )
         metrics.update(per_class_metrics)
+        metrics["pos_rate"] = float((proba_np >= best_threshold).mean())
+        metrics["pos_rate_at_05"] = float((proba_np >= 0.5).mean())
 
         self.logger.info(
             f"[{split.upper()}] Accuracy: {metrics['accuracy']:.4f} | "
-            f"F1-Macro: {metrics['f1_macro']:.4f} | "
+            f"F1-Macro: {metrics['f1_macro']:.4f} (tuned threshold={best_threshold:.2f}) | "
+            f"F1@0.5: {metrics['f1_macro_at_05']:.4f} | "
             f"ROC-AUC: {metrics['auc_roc']:.4f} | "
             f"Recall_Pos: {metrics.get('recall_pos', 0):.4f} | "
             f"Recall_Neg: {metrics.get('recall_neg', 0):.4f} | "

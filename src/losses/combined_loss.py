@@ -279,9 +279,17 @@ class CombinedLoss(nn.Module):
         # === Contrastive loss (only if applicable AND configured) ===
         self._has_contrastive = False
         self.contrastive = None
+        self.contrastive_loss = None
         
-        if self.contrastive_applicable and contrastive_lambda > 0:
+        if ablation_mode == "full_no_contrastive":
+            self.lambda_con = 0.0
+            logger.info(
+                "[CombinedLoss] ablation='full_no_contrastive': "
+                "InfoNCE module NOT instantiated, contrastive disabled"
+            )
+        elif self.contrastive_applicable and contrastive_lambda > 0:
             self.contrastive = InfoNCELoss(init_temperature=contrastive_temperature_init)
+            self.contrastive_loss = self.contrastive
             self._has_contrastive = True
             self.lambda_con = contrastive_lambda
         else:
@@ -296,7 +304,7 @@ class CombinedLoss(nn.Module):
         
         logger.info(
             f"[CombinedLoss] mode={ablation_mode} | cls={cls_loss_type} | "
-            f"contrastive_applicable={self.contrastive_applicable} | "
+            f"contrastive={'enabled' if self._has_contrastive else 'DISABLED'} | "
             f"lambda_con={self.lambda_con:.4f}"
         )
 
@@ -310,6 +318,8 @@ class CombinedLoss(nn.Module):
             "full",
             "full_no_contrastive",  # has T+I architecturally, but lambda might be forced to 0
             "full_no_modality_dropout",
+            "full_no_dropout",
+            "full_no_metadata_in_fusion",
             "full_no_attention",
             "full_no_gating",
             "text_image",  # T+I bimodal
@@ -343,8 +353,11 @@ class CombinedLoss(nn.Module):
         Returns:
             Dictionary with keys:
             - 'loss': Total loss (scalar tensor)
+            - 'total': Alias of 'loss' for compatibility with smoke tests
             - 'cls_loss': Classification loss component (detached for logging)
+            - 'cls': Alias of 'cls_loss' for compatibility with smoke tests
             - 'con_loss': Contrastive loss component (detached) or None if N/A
+            - 'con': Alias of 'con_loss' for compatibility with smoke tests
             - 'temperature': Current temperature value (detached) or None if N/A
         """
         # === STEP 1: Handle output_dict extraction (NEW ADAPTIVE LOGIC) ===
@@ -389,9 +402,16 @@ class CombinedLoss(nn.Module):
             # Unimodal or missing projections: skip contrastive
             total = cls_loss
 
+        if self.ablation_mode == "full_no_contrastive":
+            con_loss = torch.zeros((), device=logits.device, dtype=cls_loss.dtype)
+            temperature = None
+
         return {
             "loss": total,
+            "total": total,
             "cls_loss": cls_loss.detach(),
+            "cls": cls_loss.detach(),
             "con_loss": con_loss.detach() if con_loss is not None else None,
+            "con": con_loss.detach() if con_loss is not None else None,
             "temperature": temperature,
         }

@@ -96,7 +96,7 @@ def find_best_threshold(
 
     Intended for validation set only—never use on test set to avoid data leakage.
 
-    Sweeps thresholds from 0.1 to 0.9 in steps of 0.01 and returns the threshold
+    Sweeps thresholds from 0.05 to 0.95 in steps of 0.01 and returns the threshold
     that maximizes the specified metric.
 
     Args:
@@ -106,7 +106,7 @@ def find_best_threshold(
                 "precision", "recall" (default: "f1_binary").
 
     Returns:
-        Best threshold value in [0.1, 0.9].
+        Best threshold value in [0.05, 0.95].
 
     Raises:
         ValueError: If metric is not recognized.
@@ -114,7 +114,7 @@ def find_best_threshold(
     best_threshold = 0.5
     best_value = -1.0
 
-    for threshold in np.arange(0.1, 0.91, 0.01):
+    for threshold in np.arange(0.05, 0.96, 0.01):
         y_pred = (y_pred_proba >= threshold).astype(int)
 
         if metric == "f1_binary":
