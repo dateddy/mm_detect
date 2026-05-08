@@ -1,7 +1,6 @@
 # configs/ablation/no_modality_dropout.yaml
-# Full architecture but modality dropout regularization disabled.
-# (Canonical name for configs/ablation/no_dropout.yaml)
-# @package _global_
+defaults:
+  - /base
 
 ablation_mode: full_no_modality_dropout
 experiment_name: ablation_no_modality_dropout

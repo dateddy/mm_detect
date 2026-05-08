@@ -1,11 +1,17 @@
 # configs/ablation/no_dropout.yaml
-# DEPRECATED: Use no_modality_dropout.yaml instead (better naming)
-# Kept for backward compatibility only.
-# @package _global_
+defaults:
+  - /base
 
-ablation_mode: full_no_modality_dropout
-experiment_name: ablation_no_dropout_legacy
-output_dir: outputs/ablation_no_dropout_legacy
+ablation_mode: full_no_dropout
+experiment_name: ablation_no_dropout
+output_dir: outputs/ablation_no_dropout
+
+# Disable standard nn.Dropout layers only.
+# Modality dropout is a separate ablation: no_modality_dropout.yaml.
+model:
+  projection_dropout: 0.0
+  attention_dropout: 0.0
+  classifier_dropout: 0.0
 
 training:
-  modality_dropout: 0.0
+  modality_dropout: 0.15

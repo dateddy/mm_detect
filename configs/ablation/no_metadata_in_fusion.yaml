@@ -1,0 +1,8 @@
+# configs/ablation/no_metadata_in_fusion.yaml
+# Parameter-controlled ablation: encode metadata but exclude it from fusion.
+defaults:
+  - /base
+
+ablation_mode: full_no_metadata_in_fusion
+experiment_name: ablation_no_metadata_in_fusion
+output_dir: outputs/ablation_no_metadata_in_fusion

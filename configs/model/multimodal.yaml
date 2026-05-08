@@ -1,64 +1,8 @@
-# Multimodal model configuration (full model with all modalities)
+# configs/model/multimodal.yaml
+defaults:
+  - /base
 
-model_name: "multimodal_full"
-description: "Full multimodal model with text, image, and metadata"
+ablation_mode: full
 
-# Text encoder
-text_encoder:
-  type: "phobert"
-  pretrained: "vinai/phobert-base"
-  output_dim: 768
-  freeze: false  # fine-tune PhoBERT
-  dropout: 0.1
-
-# Image encoder
-image_encoder:
-  type: "vit"
-  pretrained: "google/vit-base-patch16-224"
-  output_dim: 768
-  freeze: false  # fine-tune ViT
-  dropout: 0.1
-
-# Metadata encoder
-metadata_encoder:
-  input_dim: 32  # after embedding categorical features
-  hidden_dim: 128
-  output_dim: 768
-  dropout: 0.2
-  num_layers: 2
-
-# Shared projection layer
-projection:
-  input_dim: 768
-  output_dim: 256
-  dropout: 0.3
-
-# Cross-attention module
-cross_attention:
-  num_heads: 8
-  d_model: 256
-  d_ff: 1024
-  dropout: 0.3
-
-# Modality dropout (randomly drop modalities during training)
-modality_dropout:
-  enabled: true
-  text_drop_prob: 0.1
-  image_drop_prob: 0.1
-  metadata_drop_prob: 0.2
-
-# Gating fusion
-gating_fusion:
-  enabled: true
-  input_dim: 256
-  num_gating_mlp_layers: 2
-
-# Residual connections
-residual:
-  enabled: true
-
-# Classification head
-classification_head:
-  hidden_dim: 128
-  output_dim: 1
-  dropout: 0.3
+experiment_name: multimodal_full
+output_dir: outputs/multimodal_full

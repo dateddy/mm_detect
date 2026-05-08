@@ -1,6 +1,5 @@
 # configs/ablation/no_attention.yaml
-# Full architecture but cross-attention bypassed (projections fed directly to fusion).
-# @package _global_
+# Full model with dual cross-attention removed; projections feed gated fusion.
 
 ablation_mode: full_no_attention
 experiment_name: ablation_no_attention

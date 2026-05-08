@@ -1,6 +1,5 @@
 # configs/ablation/no_gating.yaml
-# Full architecture but gating fusion replaced by simple sum.
-# @package _global_
+# Full model with learnable gated fusion replaced by simple sum + LayerNorm.
 
 ablation_mode: full_no_gating
 experiment_name: ablation_no_gating

@@ -1,7 +1,6 @@
 # configs/ablation/no_metadata.yaml
-# Legacy alias: text_image_only (backward compatibility)
-# @package _global_
-
+# Architectural no-metadata alias: use the text+image model with no metadata branch.
+# For parameter-controlled metadata fusion ablation, use no_metadata_in_fusion.yaml.
 ablation_mode: text_image
 experiment_name: ablation_no_metadata
 output_dir: outputs/ablation_no_metadata

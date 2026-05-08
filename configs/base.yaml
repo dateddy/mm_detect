@@ -14,9 +14,11 @@ paths:
   raw_csv: data/raw/ads_vietnam_clean.csv
   images_dir: data/raw/ad_images/
   processed_dir: data/processed/
+  embeddings_dir: data/embeddings/
   metadata_scaler: data/processed/metadata_scaler.joblib
   output_dir: outputs/
   log_dir: outputs/logs/
+  checkpoint_dir: experiments/
 
 # ========================================
 # Data
@@ -25,6 +27,7 @@ data:
   train_split: 0.7
   val_split: 0.15
   test_split: 0.15
+  estimated_pos_rate: 0.61
   split_seed: 42
   split_strategy: page_level
   num_workers: 4
@@ -47,6 +50,8 @@ model:
   projection_dropout: 0.1
   attention_dropout: 0.1
   classifier_dropout: 0.3
+  
+  metadata_input_dim: 17
 
 # ========================================
 # Metadata feature engineering
@@ -111,6 +116,14 @@ loss:
   # Contrastive
   contrastive_lambda: 0.1
   contrastive_temperature_init: 0.07
+
+# ========================================
+# Text processing
+# ========================================
+text:
+  columns:
+    - ad_creative_bodies
+    - ad_creative_link_titles
 
 # ========================================
 # Logging
