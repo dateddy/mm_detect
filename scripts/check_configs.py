@@ -42,7 +42,7 @@ def main():
     if ablation_dir.exists():
         for f in sorted(ablation_dir.glob("*.yaml")):
             name = f.stem
-            is_legacy = (name in ["no_metadata", "no_dropout"])  # legacy aliases
+            is_legacy = (name in ["no_metadata"])  # legacy aliases
             is_template = is_legacy
             config_files.append((name, f, is_template))
     
@@ -83,20 +83,20 @@ def main():
     
     # Check for errors
     if errors:
-        print(f"\n✗ {len(errors)} config file(s) failed to load:")
+        print(f"\n[FAIL] {len(errors)} config file(s) failed to load:")
         for path, error in errors:
             print(f"  {path}: {error}")
         all_valid = False
     else:
-        print(f"\n✓ All {len(config_files)} configs loaded successfully")
+        print(f"\n[OK] All {len(config_files)} configs loaded successfully")
     
     # Check duplicate modes in user-facing configs
     print("\nUser-facing configs by ablation mode:")
     for mode, files in sorted(mode_map.items()):
         if len(files) > 1:
-            print(f"  ⚠ Mode '{mode}' used by: {files}")
+            print(f"  [WARN] Mode '{mode}' used by: {files}")
         else:
-            print(f"  ✓ Mode '{mode}': {files[0]}")
+            print(f"  [OK] Mode '{mode}': {files[0]}")
     
     # Check duplicate experiment names
     print("\nUser-facing configs by experiment name:")
@@ -106,11 +106,11 @@ def main():
             continue
         seen_exps.add(exp)
         if len(files) > 1:
-            print(f"  ⚠ Experiment '{exp}' used by: {files}")
+            print(f"  [WARN] Experiment '{exp}' used by: {files}")
         else:
-            print(f"  ✓ Experiment '{exp}'")
+            print(f"  [OK] Experiment '{exp}'")
     
-    # Expected ablation modes (11 distinct modes)
+    # Expected ablation modes (13 distinct modes)
     expected_modes = {
         'full',
         'text_only',
@@ -121,6 +121,8 @@ def main():
         'image_metadata',
         'full_no_contrastive',
         'full_no_modality_dropout',
+        'full_no_dropout',
+        'full_no_metadata_in_fusion',
         'full_no_attention',
         'full_no_gating'
     }
@@ -131,9 +133,9 @@ def main():
     print(f"\nCoverage of expected ablation modes ({len(expected_modes)}):")
     for mode in sorted(expected_modes):
         if mode in actual_modes:
-            print(f"  ✓ {mode}")
+            print(f"  [OK] {mode}")
         else:
-            print(f"  ✗ {mode} (MISSING)")
+            print(f"  [FAIL] {mode} (MISSING)")
             all_valid = False
     
     # Config count check
@@ -141,23 +143,23 @@ def main():
     print(f"  Total configs: {len(config_files)}")
     print(f"  Templates: {sum(1 for _, _, is_template in config_files if is_template)}")
     print(f"  User-facing: {len(user_facing_configs)}")
-    print(f"  Expected user-facing: 11 (default, 3 model, 7 ablation)")
+    print(f"  Expected user-facing: 13 (default, 3 model, 9 ablation)")
     
-    if len(user_facing_configs) < 11:
-        print(f"  ✗ Not enough user-facing configs!")
+    if len(user_facing_configs) < 13:
+        print(f"  [FAIL] Not enough user-facing configs!")
         all_valid = False
     else:
-        print(f"  ✓ Sufficient configs")
+        print(f"  [OK] Sufficient configs")
     
     print("\n" + "="*80)
     
     if all_valid and not errors and not missing_modes:
-        print("\n✓ All validations passed!")
+        print("\n[OK] All validations passed!")
         print(f"\nConfig Summary:")
         print(f"  {len(user_facing_configs)} user-facing configs covering {len(actual_modes)} ablation modes")
         return 0
     else:
-        print("\n✗ Some validations failed (see details above)")
+        print("\n[FAIL] Some validations failed (see details above)")
         return 1
 
 if __name__ == "__main__":

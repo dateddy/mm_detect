@@ -97,10 +97,10 @@ def diagnose_image_loading(config_path: str, n_samples: int = 20) -> None:
     logger.info(f"File extensions found in {images_dir}: {sorted(image_extensions)}")
 
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(config["encoders"]["text_encoder_name"])
+    tokenizer = AutoTokenizer.from_pretrained(config["model"]["text_model_name"])
 
     # Load transforms
-    image_size = config["encoders"].get("image_size", 224)
+    image_size = config["model"].get("image_size", 224)
     image_transform = get_image_transforms("val", image_size)
 
     # Create dataset

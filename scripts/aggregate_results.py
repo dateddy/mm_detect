@@ -37,6 +37,8 @@ DISPLAY_INFO = {
     "image_metadata":      ("I + M (no text)", "Visual + behavioral"),
     "no_contrastive":      ("Full w/o contrastive loss", "Effect of InfoNCE"),
     "no_modality_dropout": ("Full w/o modality dropout", "Regularization effect"),
+    "no_dropout":          ("Full w/o nn.Dropout layers", "Standard dropout regularization"),
+    "no_metadata_in_fusion": ("Full w/o metadata in fusion", "Metadata fusion contribution"),
     "no_attention":        ("Full w/o cross-attention", "Effect of attention fusion"),
     "no_gating":           ("Full w/o gated fusion (sum instead)", "Effect of gating"),
 }
@@ -52,6 +54,8 @@ DISPLAY_ORDER = [
     "image_metadata",
     "no_contrastive",
     "no_modality_dropout",
+    "no_dropout",
+    "no_metadata_in_fusion",
     "no_attention",
     "no_gating",
 ]

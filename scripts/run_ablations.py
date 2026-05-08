@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+
 Run ablation studies sequentially with sanity checks.
 
 Usage:
@@ -60,6 +61,8 @@ ABLATION_CONFIGS = {
     "image_metadata":           "configs/ablation/image_metadata_only.yaml",
     "no_contrastive":           "configs/ablation/no_contrastive.yaml",
     "no_modality_dropout":      "configs/ablation/no_modality_dropout.yaml",
+    "no_dropout":               "configs/ablation/no_dropout.yaml",
+    "no_metadata_in_fusion":     "configs/ablation/no_metadata_in_fusion.yaml",
     "no_attention":             "configs/ablation/no_attention.yaml",
     "no_gating":                "configs/ablation/no_gating.yaml",
 }
@@ -74,6 +77,8 @@ RECOMMENDED_ORDER = [
     "text_image",
     "no_contrastive",
     "no_modality_dropout",
+    "no_dropout",
+    "no_metadata_in_fusion",
     "no_attention",
     "no_gating",
     "full",                     # full model last (longest)
@@ -125,6 +130,8 @@ def verify_model_construction(config: Dict, model: torch.nn.Module) -> Dict:
         "full":                     (True, True, True),
         "full_no_contrastive":      (True, True, True),
         "full_no_modality_dropout": (True, True, True),
+        "full_no_dropout":          (True, True, True),
+        "full_no_metadata_in_fusion": (True, True, True),
         "full_no_attention":        (True, True, True),
         "full_no_gating":           (True, True, True),
         "text_only":                (True, False, False),
@@ -208,8 +215,8 @@ def run_single_ablation(
             images_dir = project_root / images_dir
         
         # Initialize tokenizer and transforms
-        tokenizer = AutoTokenizer.from_pretrained(config["encoders"]["text_encoder_name"])
-        image_size = config["encoders"].get("image_size", 224)
+        tokenizer = AutoTokenizer.from_pretrained(config["model"]["text_model_name"])
+        image_size = config["model"].get("image_size", 224)
         
         image_transforms = {
             "train": transforms.Compose([
@@ -240,6 +247,7 @@ def run_single_ablation(
             image_transforms=image_transforms,
             metadata_cols=config.get("metadata_features", []),
             offline_embeddings_dir=str(embeddings_dir) if embeddings_dir.exists() else None,
+            ablation_mode=config.get("ablation_mode", "full"),
         )
         
         # Create dataloaders

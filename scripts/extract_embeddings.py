@@ -63,8 +63,8 @@ def extract_embeddings(config: dict, split: str, batch_size: int = 32):
     from transformers import AutoTokenizer
     import torchvision.transforms as transforms
     
-    tokenizer = AutoTokenizer.from_pretrained(config["encoders"]["text_encoder_name"])
-    image_size = config["encoders"].get("image_size", 224)
+    tokenizer = AutoTokenizer.from_pretrained(config["model"]["text_model_name"])
+    image_size = config["model"].get("image_size", 224)
     image_transform = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
@@ -91,17 +91,17 @@ def extract_embeddings(config: dict, split: str, batch_size: int = 32):
 
     # Initialize encoders
     text_encoder = TextEncoder(
-        model_name=config["encoders"]["text_encoder_name"],
+        model_name=config["model"]["text_model_name"],
         freeze=True,
     ).to(device).eval()
 
     image_encoder = ImageEncoder(
-        model_name=config["encoders"]["image_encoder_name"],
+        model_name=config["model"]["image_model_name"],
         freeze=True,
     ).to(device).eval()
 
-    logger.info(f"Text encoder: {config['encoders']['text_encoder_name']}")
-    logger.info(f"Image encoder: {config['encoders']['image_encoder_name']}")
+    logger.info(f"Text encoder: {config['model']['text_model_name']}")
+    logger.info(f"Image encoder: {config['model']['image_model_name']}")
 
     # Collect embeddings
     all_text_emb = []

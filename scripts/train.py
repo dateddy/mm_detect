@@ -17,7 +17,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data.dataset import create_datasets
-from src.data.preprocessing import compute_class_weights
+from src.data.preprocessing import compute_class_weights, compute_pos_weight
 from src.losses.combined_loss import CombinedLoss
 from src.models import build_model, MultimodalMisinfoDetector
 from src.models.full_model import model_summary
@@ -80,9 +80,15 @@ def parse_args():
     parser.add_argument(
         "--ablation_mode",
         type=str,
-        default="full",
-        choices=["full", "text_only", "image_only", "metadata_only"],
-        help="Ablation mode: 'full' (multimodal), 'text_only', 'image_only', or 'metadata_only' (default: full)",
+        default=None,
+        choices=[
+            "full", "text_only", "image_only", "metadata_only",
+            "text_image", "text_metadata", "image_metadata",
+            "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_dropout", "full_no_metadata_in_fusion",
+            "full_no_attention", "full_no_gating",
+        ],
+        help="Optional ablation mode override. Defaults to the value in the config file.",
     )
     parser.add_argument(
         "--dry_run",
@@ -121,6 +127,8 @@ def main():
 
     # Merge: override_config takes precedence over base_config
     config = deep_merge_dicts(base_config, override_config)
+    if args.ablation_mode is not None:
+        config["ablation_mode"] = args.ablation_mode
 
     logger_temp = logging.getLogger(__name__)
     logger_temp.info(f"Loaded base config from {base_config_path}")
@@ -202,8 +210,8 @@ def main():
     from transformers import AutoTokenizer
     import torchvision.transforms as transforms
     
-    tokenizer = AutoTokenizer.from_pretrained(config["encoders"]["text_encoder_name"])
-    image_size = config["encoders"].get("image_size", 224)
+    tokenizer = AutoTokenizer.from_pretrained(config["model"]["text_model_name"])
+    image_size = config["model"].get("image_size", 224)
     
     image_transforms = {
         "train": transforms.Compose([
@@ -234,6 +242,7 @@ def main():
         image_transforms=image_transforms,
         metadata_cols=config.get("metadata_features", []),
         offline_embeddings_dir=str(embeddings_dir) if embeddings_dir.exists() else None,
+        ablation_mode=config.get("ablation_mode", "full"),
     )
 
     logger.info(f"Dataset sizes: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}")
@@ -243,9 +252,11 @@ def main():
     train_csv_path = processed_dir / "splits" / "train.csv"
     train_df = pd.read_csv(train_csv_path)
     class_weights_list = compute_class_weights(train_df)
+    pos_weight = compute_pos_weight(train_df)
     # Keep class_weights on CPU initially for loss function initialization
     class_weights = class_weights_list
     logger.info(f"Class weights: {class_weights.numpy()}")
+    logger.info(f"BCE pos_weight (n_neg/n_pos): {pos_weight:.4f}")
 
     # ========== 9. Create dataloaders ==========
     from src.data.collate import collate_fn
@@ -287,8 +298,7 @@ def main():
 
     # ========== 11. Build model ==========
     logger.info("Building model...")
-    logger.info(f"Ablation mode: {args.ablation_mode}")
-    config["ablation_mode"] = args.ablation_mode
+    logger.info(f"Ablation mode: {config.get('ablation_mode', 'full')}")
     model = build_model(config)
     model.to(device)
     num_params = sum(p.numel() for p in model.parameters())
@@ -306,7 +316,8 @@ def main():
     # ========== 12. Build loss ==========
     logger.info("Building loss function...")
     loss_fn = CombinedLoss(
-        class_weights=class_weights,
+        class_weights=None,
+        pos_weight=pos_weight,
         contrastive_lambda=config["loss"].get("contrastive_lambda", 0.1),
         contrastive_temperature_init=config["loss"].get("contrastive_temperature_init", 0.07),
         label_smoothing=config["loss"].get("label_smoothing", 0.0),
@@ -316,6 +327,7 @@ def main():
         focal_gamma_pos=config["loss"].get("focal_gamma_pos", 1.0),
         focal_gamma_neg=config["loss"].get("focal_gamma_neg", 4.0),
         focal_clip=config["loss"].get("focal_clip", 0.05),
+        ablation_mode=config.get("ablation_mode", "full"),
     )
     logger.info(f"Loss: CombinedLoss (type={config['loss'].get('cls_loss_type', 'bce')}), label_smoothing={config['loss'].get('label_smoothing', 0.0)}")
 
