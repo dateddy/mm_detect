@@ -79,6 +79,7 @@ def extract_embeddings(config: dict, split: str, batch_size: int = 32):
         metadata_cols=config.get("metadata_features", []),
         split=split,
         offline_embeddings_dir=None,  # Force online mode
+        text_cols=config.get("text", {}).get("columns"),
     )
 
     dataloader = DataLoader(

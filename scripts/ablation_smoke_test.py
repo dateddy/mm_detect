@@ -352,8 +352,10 @@ def smoke_test_one(
             class_weights=None,
             pos_weight=pos_weight,
             contrastive_lambda=config.get("loss", {}).get("contrastive_lambda", 0.1),
+            contrastive_temperature_init=config.get("loss", {}).get("contrastive_temperature_init", 0.07),
             label_smoothing=config.get("loss", {}).get("label_smoothing", 0.0),
             ablation_mode=model.ablation_mode,
+            aux_lambda=config.get("loss", {}).get("aux_lambda", 0.1),
         ).to(device)
         optimizer, _ = build_optimizer_phase1(model, loss_fn, config)
         
@@ -390,6 +392,7 @@ def smoke_test_one(
                     image_emb=output.get("i_proj", None),
                     valid_mask=output.get("image_valid", batch.get("valid_mask", None)),
                     is_multimodal=output.get("is_multimodal", True),
+                    output_dict=output,
                 )
                 loss = losses_dict["loss"]
 
