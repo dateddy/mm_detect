@@ -213,6 +213,7 @@ class CombinedLoss(nn.Module):
         focal_clip: float = 0.05,
         ablation_mode: str = "full",
         pos_weight: float = 1.0,
+        aux_lambda: float = 0.1,
     ):
         """
         Initialize CombinedLoss.
@@ -230,6 +231,7 @@ class CombinedLoss(nn.Module):
             focal_clip: Probability clipping for AsymmetricFocalLossWithLogits.
             ablation_mode: Model ablation mode (e.g., "text_only", "full", "text_image").
             pos_weight: Positive class weight for BCE (default: 1.0).
+            aux_lambda: Weight for auxiliary modality classification losses.
         """
         super().__init__()
 
@@ -237,6 +239,12 @@ class CombinedLoss(nn.Module):
         self.label_smoothing = label_smoothing
         self.cls_loss_type = cls_loss_type
         self.contrastive_lambda_config = contrastive_lambda
+        self.aux_lambda = 0.0 if ablation_mode in {
+            "text_only",
+            "image_only",
+            "metadata_only",
+        } else float(aux_lambda)
+        self.aux_pos_weight = float(pos_weight)
         
         # === Determine if contrastive loss applies based on ablation mode ===
         self.contrastive_applicable = self._is_contrastive_applicable(ablation_mode)
@@ -305,7 +313,7 @@ class CombinedLoss(nn.Module):
         logger.info(
             f"[CombinedLoss] mode={ablation_mode} | cls={cls_loss_type} | "
             f"contrastive={'enabled' if self._has_contrastive else 'DISABLED'} | "
-            f"lambda_con={self.lambda_con:.4f}"
+            f"lambda_con={self.lambda_con:.4f} | aux_lambda={self.aux_lambda:.4f}"
         )
 
     @staticmethod
@@ -397,21 +405,60 @@ class CombinedLoss(nn.Module):
                 and is_multimodal):
             con_loss = self.contrastive(text_emb, image_emb, valid_mask)
             temperature = self.contrastive.temperature.detach()
-            total = cls_loss + self.lambda_con * con_loss
         else:
             # Unimodal or missing projections: skip contrastive
-            total = cls_loss
+            con_loss = None
 
         if self.ablation_mode == "full_no_contrastive":
             con_loss = torch.zeros((), device=logits.device, dtype=cls_loss.dtype)
             temperature = None
+
+        aux_text_loss = torch.zeros((), device=logits.device, dtype=cls_loss.dtype)
+        aux_image_loss = torch.zeros((), device=logits.device, dtype=cls_loss.dtype)
+        aux_meta_loss = torch.zeros((), device=logits.device, dtype=cls_loss.dtype)
+
+        if self.aux_lambda > 0 and output_dict is not None:
+            aux_pos_weight = torch.tensor(
+                self.aux_pos_weight,
+                device=logits.device,
+                dtype=logits.dtype,
+            )
+            aux_targets = targets.squeeze(-1)
+            if output_dict.get("aux_text_logits") is not None:
+                aux_text_loss = F.binary_cross_entropy_with_logits(
+                    output_dict["aux_text_logits"].squeeze(-1),
+                    aux_targets,
+                    pos_weight=aux_pos_weight,
+                )
+            if output_dict.get("aux_image_logits") is not None:
+                aux_image_loss = F.binary_cross_entropy_with_logits(
+                    output_dict["aux_image_logits"].squeeze(-1),
+                    aux_targets,
+                    pos_weight=aux_pos_weight,
+                )
+            if output_dict.get("aux_meta_logits") is not None:
+                aux_meta_loss = F.binary_cross_entropy_with_logits(
+                    output_dict["aux_meta_logits"].squeeze(-1),
+                    aux_targets,
+                    pos_weight=aux_pos_weight,
+                )
+
+        aux_total = aux_text_loss + aux_image_loss + aux_meta_loss
+        con_total = con_loss if con_loss is not None else torch.zeros(
+            (), device=logits.device, dtype=cls_loss.dtype
+        )
+        total = cls_loss + self.lambda_con * con_total + self.aux_lambda * aux_total
 
         return {
             "loss": total,
             "total": total,
             "cls_loss": cls_loss.detach(),
             "cls": cls_loss.detach(),
-            "con_loss": con_loss.detach() if con_loss is not None else None,
-            "con": con_loss.detach() if con_loss is not None else None,
+            "con_loss": con_total.detach(),
+            "con": con_total.detach(),
+            "aux_text": aux_text_loss.detach(),
+            "aux_image": aux_image_loss.detach(),
+            "aux_meta": aux_meta_loss.detach(),
+            "aux_total": aux_total.detach(),
             "temperature": temperature,
         }

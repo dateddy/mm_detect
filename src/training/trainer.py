@@ -92,11 +92,17 @@ class Trainer:
         )
 
         # Initialize mixed precision scaler if enabled
-        self.mixed_precision = config["training"].get("mixed_precision", False)
+        self.mixed_precision = config["training"].get(
+            "use_amp",
+            config["training"].get("mixed_precision", False),
+        )
         self.scaler = GradScaler() if self.mixed_precision else None
 
         # Initialize early stopping with config metric
-        early_stop_patience = config["training"].get("early_stopping_patience", 8)
+        early_stop_patience = config["training"].get(
+            "early_stopping_patience",
+            config["training"].get("patience", 8),
+        )
         early_stop_metric = config["training"].get("early_stopping_metric", "f1_macro")
         ema_alpha = config["training"].get("early_stopping_ema_alpha", 0.7)
         
@@ -171,6 +177,116 @@ class Trainer:
     def _count_modalities(self) -> int:
         """Count active modalities in the model."""
         return sum([self._has_text, self._has_image, self._has_metadata])
+
+    def _log_attention_diagnostics(self, epoch: int) -> None:
+        """Log cross-attention gate statistics if applicable."""
+        dual_cross_attn = getattr(self.model, "dual_cross_attn", None)
+        if dual_cross_attn is None and hasattr(self.model, "module"):
+            dual_cross_attn = getattr(self.model.module, "dual_cross_attn", None)
+
+        if dual_cross_attn is None:
+            return
+
+        try:
+            if hasattr(dual_cross_attn, "get_combined_stats"):
+                stats = dual_cross_attn.get_combined_stats()
+                self.logger.info(
+                    f"[Epoch {epoch + 1}] Selective Attention: "
+                    f"sample_gate=[mean={stats['sample_gate_mean']:.3f}, "
+                    f"std={stats['sample_gate_std']:.3f}, "
+                    f"min={stats['sample_gate_min']:.3f}, "
+                    f"max={stats['sample_gate_max']:.3f}] | "
+                    f"text_gate=[mean={stats['text_gate_mean']:.3f}, "
+                    f"std={stats['text_gate_std']:.3f}] | "
+                    f"image_gate=[mean={stats['image_gate_mean']:.3f}, "
+                    f"std={stats['image_gate_std']:.3f}]"
+                )
+            elif hasattr(dual_cross_attn, "get_gate_stats"):
+                stats = dual_cross_attn.get_gate_stats()
+                self.logger.info(
+                    f"[Epoch {epoch + 1}] Attention gates: "
+                    f"text=[mean={stats['text_gate_mean']:.3f}, "
+                    f"min={stats['text_gate_min']:.3f}, "
+                    f"max={stats['text_gate_max']:.3f}, "
+                    f"std={stats['text_gate_std']:.3f}] | "
+                    f"image=[mean={stats['image_gate_mean']:.3f}, "
+                    f"min={stats['image_gate_min']:.3f}, "
+                    f"max={stats['image_gate_max']:.3f}, "
+                    f"std={stats['image_gate_std']:.3f}]"
+                )
+        except Exception:
+            return
+
+    def analyze_sample_gates(self, val_loader: DataLoader, save_path: str | Path | None = None):
+        """Collect per-sample selective attention gates on a validation loader."""
+        model_for_attr = self.model.module if hasattr(self.model, "module") else self.model
+        dual_cross_attn = getattr(model_for_attr, "dual_cross_attn", None)
+        if dual_cross_attn is None or not hasattr(dual_cross_attn, "get_sample_gate_stats"):
+            return None
+
+        self.model.eval()
+        sample_gates = []
+        sample_labels = []
+        sample_correct = []
+
+        threshold = getattr(self, "_val_best_threshold", 0.5)
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = self._move_batch_to_device(batch)
+                output = self.model(batch)
+                gates = getattr(dual_cross_attn, "_last_sample_gates", None)
+                if gates is None:
+                    continue
+
+                logits = output["logits"].squeeze(-1)
+                preds = (torch.sigmoid(logits) >= threshold).long()
+                labels = batch["label"].long()
+
+                sample_gates.extend(gates.detach().cpu().tolist())
+                sample_labels.extend(labels.detach().cpu().tolist())
+                sample_correct.extend((preds == labels).detach().cpu().tolist())
+
+        if not sample_gates:
+            return None
+
+        sample_gates_np = np.array(sample_gates)
+        sample_labels_np = np.array(sample_labels)
+        sample_correct_np = np.array(sample_correct)
+
+        self.logger.info("=" * 50)
+        self.logger.info("Sample Gate Analysis")
+        self.logger.info("=" * 50)
+        self.logger.info(f"Mean sample_gate: {sample_gates_np.mean():.4f}")
+        self.logger.info(f"Std sample_gate:  {sample_gates_np.std():.4f}")
+
+        for lo, hi in [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0)]:
+            mask = (sample_gates_np >= lo) & (sample_gates_np < hi)
+            n = int(mask.sum())
+            if n == 0:
+                continue
+            acc = sample_correct_np[mask].mean()
+            pos_rate = sample_labels_np[mask].mean()
+            self.logger.info(
+                f"  Gate [{lo:.1f}, {hi:.1f}): n={n} "
+                f"({n / len(sample_gates_np) * 100:.1f}%), "
+                f"acc={acc:.4f}, pos_rate={pos_rate:.4f}"
+            )
+
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(
+                save_path,
+                sample_gates=sample_gates_np,
+                sample_labels=sample_labels_np,
+                sample_correct=sample_correct_np,
+            )
+
+        return {
+            "sample_gates": sample_gates_np,
+            "sample_labels": sample_labels_np,
+            "sample_correct": sample_correct_np,
+        }
 
     def apply_modality_dropout(self, batch: dict) -> dict:
         """
@@ -270,29 +386,25 @@ class Trainer:
         
         # ===== STEP 1: Unfreeze encoder blocks in the model =====
         self.logger.info(f"Unfreezing top-{k} encoder blocks...")
-        self.model.unfreeze_encoders(k)
+        if hasattr(self.model, "unfreeze_encoders"):
+            self.model.unfreeze_encoders(k)
+        elif hasattr(self.model, "transition_to_phase2"):
+            self.model.transition_to_phase2(k)
         
         # ===== STEP 2: Collect newly trainable encoder parameters =====
-        # Text encoder: unfreeze top-k blocks of PhoBERT (HuggingFace model)
-        # Access: model.text_encoder.model.encoder.layer[-k:]
         text_unfrozen_params = []
-        if hasattr(self.model.text_encoder.model, "encoder"):
-            if hasattr(self.model.text_encoder.model.encoder, "layer"):
-                text_blocks = self.model.text_encoder.model.encoder.layer
-                for block in text_blocks[-k:]:
-                    for p in block.parameters():
-                        if p.requires_grad:
-                            text_unfrozen_params.append(p)
+        text_encoder = getattr(self.model, "text_encoder", None)
+        if text_encoder is not None:
+            for p in text_encoder.parameters():
+                if p.requires_grad:
+                    text_unfrozen_params.append(p)
         
-        # Image encoder: unfreeze top-k blocks of ViT (timm model)
-        # Access: model.image_encoder.model.blocks[-k:]
         image_unfrozen_params = []
-        if hasattr(self.model.image_encoder.model, "blocks"):
-            image_blocks = self.model.image_encoder.model.blocks
-            for block in image_blocks[-k:]:
-                for p in block.parameters():
-                    if p.requires_grad:
-                        image_unfrozen_params.append(p)
+        image_encoder = getattr(self.model, "image_encoder", None)
+        if image_encoder is not None:
+            for p in image_encoder.parameters():
+                if p.requires_grad:
+                    image_unfrozen_params.append(p)
         
         n_text = sum(p.numel() for p in text_unfrozen_params)
         n_image = sum(p.numel() for p in image_unfrozen_params)
@@ -375,6 +487,9 @@ class Trainer:
         total_loss = 0.0
         total_cls_loss = 0.0
         total_con_loss = 0.0
+        total_aux_text_loss = 0.0
+        total_aux_image_loss = 0.0
+        total_aux_meta_loss = 0.0
         total_cosine_sim = 0.0
         total_temperature = 0.0
         num_batches = 0
@@ -400,14 +515,15 @@ class Trainer:
                     loss_dict = self.criterion(
                         logits=output["logits"],
                         labels=batch["label"].to(self.device),
-                        text_emb=output["t_proj"],        # Can be None in unimodal modes
-                        image_emb=output["i_proj"],        # Can be None in unimodal modes
+                        text_emb=output.get("t_proj"),        # Can be None in unimodal modes
+                        image_emb=output.get("i_proj"),        # Can be None in unimodal modes
                         valid_mask=(
-                            output["image_valid"]
-                            if output["image_valid"] is not None
+                            output.get("image_valid")
+                            if output.get("image_valid") is not None
                             else batch.get("valid_mask")
                         ),
-                        is_multimodal=output["is_multimodal"],  # Flag for ablation mode
+                        is_multimodal=output.get("is_multimodal", False),  # Flag for ablation mode
+                        output_dict=output,
                     )
                     loss = loss_dict["loss"]
 
@@ -419,20 +535,23 @@ class Trainer:
                 loss_dict = self.criterion(
                     logits=output["logits"],
                     labels=batch["label"].to(self.device),
-                    text_emb=output["t_proj"],        # Can be None in unimodal modes
-                    image_emb=output["i_proj"],        # Can be None in unimodal modes
+                    text_emb=output.get("t_proj"),        # Can be None in unimodal modes
+                    image_emb=output.get("i_proj"),        # Can be None in unimodal modes
                     valid_mask=(
-                        output["image_valid"]
-                        if output["image_valid"] is not None
+                        output.get("image_valid")
+                        if output.get("image_valid") is not None
                         else batch.get("valid_mask")
                     ),
-                    is_multimodal=output["is_multimodal"],  # Flag for ablation mode
+                    is_multimodal=output.get("is_multimodal", False),  # Flag for ablation mode
+                    output_dict=output,
                 )
                 loss = loss_dict["loss"]
                 loss.backward()
 
             # Diagnostic logging: embedding norm and similarity (only for multimodal mode)
-            if output["is_multimodal"] and (epoch <= 5 or epoch % 5 == 0):
+            output_is_multimodal = output.get("is_multimodal", False)
+
+            if output_is_multimodal and (epoch <= 5 or epoch % 5 == 0):
                 with torch.no_grad():
                     t = output["t_proj"].float()
                     i = output["i_proj"].float()
@@ -469,22 +588,41 @@ class Trainer:
             # Accumulate losses
             total_loss += loss.item()
             total_cls_loss += loss_dict["cls_loss"].item()
-            if contrastive_active and output["is_multimodal"] and loss_dict["con_loss"] is not None:
+            if contrastive_active and output_is_multimodal and loss_dict["con_loss"] is not None:
                 total_con_loss += loss_dict["con_loss"].item()
-            if contrastive_active and output["is_multimodal"] and loss_dict.get("temperature") is not None:
+            total_aux_text_loss += loss_dict.get("aux_text", torch.tensor(0.0)).item()
+            total_aux_image_loss += loss_dict.get("aux_image", torch.tensor(0.0)).item()
+            total_aux_meta_loss += loss_dict.get("aux_meta", torch.tensor(0.0)).item()
+            if contrastive_active and output_is_multimodal and loss_dict.get("temperature") is not None:
                 total_temperature += loss_dict.get("temperature", torch.tensor(0.0)).item()
             num_batches += 1
 
             if (batch_idx + 1) % max(1, len(self.train_loader) // 5) == 0:
                 log_msg = f"[Epoch {epoch+1}] Batch {batch_idx+1}/{len(self.train_loader)} | Loss: {total_loss/num_batches:.6f}"
-                if contrastive_active and output["is_multimodal"] and num_batches > 0:
+                if contrastive_active and output_is_multimodal and num_batches > 0:
                     avg_temp = total_temperature / num_batches
                     log_msg += f" | tau={avg_temp:.4f}"
+                if getattr(self.loss_fn, "aux_lambda", 0.0) > 0:
+                    aux_parts = []
+                    aux_t = loss_dict.get("aux_text", torch.tensor(0.0)).item()
+                    aux_i = loss_dict.get("aux_image", torch.tensor(0.0)).item()
+                    aux_m = loss_dict.get("aux_meta", torch.tensor(0.0)).item()
+                    if aux_t > 0:
+                        aux_parts.append(f"T={aux_t:.3f}")
+                    if aux_i > 0:
+                        aux_parts.append(f"I={aux_i:.3f}")
+                    if aux_m > 0:
+                        aux_parts.append(f"M={aux_m:.3f}")
+                    if aux_parts:
+                        log_msg += f" | aux=[{', '.join(aux_parts)}]"
                 self.logger.info(log_msg)
 
         mean_loss = total_loss / num_batches
         mean_cls_loss = total_cls_loss / num_batches
         mean_con_loss = total_con_loss / num_batches if num_batches > 0 else 0.0
+        mean_aux_text_loss = total_aux_text_loss / num_batches if num_batches > 0 else 0.0
+        mean_aux_image_loss = total_aux_image_loss / num_batches if num_batches > 0 else 0.0
+        mean_aux_meta_loss = total_aux_meta_loss / num_batches if num_batches > 0 else 0.0
         mean_cosine_sim = total_cosine_sim / num_batches
         mean_temperature = total_temperature / num_batches if num_batches > 0 else 0.0
 
@@ -505,18 +643,30 @@ class Trainer:
         }
         
         if is_multimodal_mode and contrastive_active:
-            self.logger.info(
+            log_msg = (
                 f"[Epoch {epoch+1}] Train Loss: {mean_loss:.6f} "
                 f"(cls={mean_cls_loss:.6f}, con={mean_con_loss:.6f}) | "
                 f"Mean intra-batch cosine sim: {mean_cosine_sim:.4f} | "
                 f"final tau={mean_temperature:.4f}"
             )
+            if getattr(self.loss_fn, "aux_lambda", 0.0) > 0:
+                log_msg += (
+                    f" | aux=[T={mean_aux_text_loss:.3f}, "
+                    f"I={mean_aux_image_loss:.3f}, M={mean_aux_meta_loss:.3f}]"
+                )
+            self.logger.info(log_msg)
         elif is_multimodal_mode:
-            self.logger.info(
+            log_msg = (
                 f"[Epoch {epoch+1}] Train Loss: {mean_loss:.6f} "
                 f"(cls={mean_cls_loss:.6f}) | "
                 f"Mean intra-batch cosine sim: {mean_cosine_sim:.4f}"
             )
+            if getattr(self.loss_fn, "aux_lambda", 0.0) > 0:
+                log_msg += (
+                    f" | aux=[T={mean_aux_text_loss:.3f}, "
+                    f"I={mean_aux_image_loss:.3f}, M={mean_aux_meta_loss:.3f}]"
+                )
+            self.logger.info(log_msg)
         else:
             self.logger.info(
                 f"[Epoch {epoch+1}] Train Loss (Unimodal): {mean_loss:.6f} "
@@ -527,6 +677,9 @@ class Trainer:
             "loss": mean_loss,
             "cls_loss": mean_cls_loss,
             "con_loss": mean_con_loss,
+            "aux_text": mean_aux_text_loss,
+            "aux_image": mean_aux_image_loss,
+            "aux_meta": mean_aux_meta_loss,
             "temperature": mean_temperature,
         }
 
@@ -563,10 +716,33 @@ class Trainer:
 
         # Convert logits to probabilities via sigmoid
         proba_np = 1.0 / (1.0 + np.exp(-logits_np))
+        proba_stats = {
+            "proba_min": float(proba_np.min()),
+            "proba_mean": float(proba_np.mean()),
+            "proba_max": float(proba_np.max()),
+            "proba_std": float(proba_np.std()),
+            "logit_mean": float(logits_np.mean()),
+            "logit_std": float(logits_np.std()),
+        }
 
         # Compute threshold-independent and threshold-tuned metrics.
         metrics_at_05 = compute_all_metrics(labels_np, proba_np, threshold=0.5)
-        best_threshold = find_best_threshold(labels_np, proba_np, metric="f1_macro")
+        if split == "test" and hasattr(self, "_val_best_threshold"):
+            best_threshold = self._val_best_threshold
+            self.logger.info(
+                f"[TEST] Using validation-tuned threshold: {best_threshold:.3f}"
+            )
+        elif split == "test":
+            best_threshold = 0.5
+            self.logger.warning(
+                "[TEST] No validation-tuned threshold recorded; using 0.500 "
+                "to avoid tuning on test data."
+            )
+        else:
+            best_threshold = find_best_threshold(labels_np, proba_np, metric="f1_macro")
+            if split == "val":
+                self._val_best_threshold = best_threshold
+
         metrics = compute_all_metrics(labels_np, proba_np, threshold=best_threshold)
         metrics["f1_macro_at_05"] = metrics_at_05["f1_macro"]
         metrics["accuracy_at_05"] = metrics_at_05["accuracy"]
@@ -579,6 +755,7 @@ class Trainer:
         metrics.update(per_class_metrics)
         metrics["pos_rate"] = float((proba_np >= best_threshold).mean())
         metrics["pos_rate_at_05"] = float((proba_np >= 0.5).mean())
+        metrics.update(proba_stats)
 
         self.logger.info(
             f"[{split.upper()}] Accuracy: {metrics['accuracy']:.4f} | "
@@ -587,7 +764,13 @@ class Trainer:
             f"ROC-AUC: {metrics['auc_roc']:.4f} | "
             f"Recall_Pos: {metrics.get('recall_pos', 0):.4f} | "
             f"Recall_Neg: {metrics.get('recall_neg', 0):.4f} | "
-            f"Miss_Rate: {metrics.get('miss_rate', 0):.4f}"
+            f"Miss_Rate: {metrics.get('miss_rate', 0):.4f} | "
+            f"Proba: min/mean/max/std="
+            f"{proba_stats['proba_min']:.4f}/"
+            f"{proba_stats['proba_mean']:.4f}/"
+            f"{proba_stats['proba_max']:.4f}/"
+            f"{proba_stats['proba_std']:.4f} | "
+            f"PosRate@0.5={metrics['pos_rate_at_05']:.3f}"
         )
 
         return metrics
@@ -704,6 +887,9 @@ class Trainer:
             # --- Validate ---
             val_metrics = self.evaluate(self.val_loader, split="val")
 
+            # --- Attention Diagnostics ---
+            self._log_attention_diagnostics(epoch)
+
             # --- Early Stopping Check ---
             early_stop_metric_key = self.config["training"].get("early_stopping_metric", "f1_macro")
             current_metric = val_metrics[early_stop_metric_key]
@@ -759,12 +945,15 @@ class Trainer:
         self.logger.info(f"Loaded best checkpoint: {self.best_checkpoint_path}")
         self.logger.info(
             f"Best val {self.config['training'].get('early_stopping_metric', 'f1_macro')}: "
-            f"{self.best_metric:.4f} at epoch {self.early_stopping.best_epoch}"
+            f"{self.best_metric:.4f} at epoch {self.early_stopping.best_epoch + 1}"
         )
 
         self.logger.info("=" * 70)
         self.logger.info(f"Best checkpoint: {self.best_checkpoint_path}")
-        self.logger.info(f"Best val F1-macro: {self.best_metric:.4f}")
+        self.logger.info(
+            f"Best val {self.config['training'].get('early_stopping_metric', 'f1_macro')}: "
+            f"{self.best_metric:.4f}"
+        )
         self.logger.info("Training complete!")
         self.logger.info("=" * 70)
 
@@ -884,7 +1073,9 @@ def train():
     loss_fn = CombinedLoss(
         class_weights=class_weights,
         contrastive_lambda=config["loss"]["contrastive_lambda"],
-        temperature=config["loss"]["temperature"],
+        contrastive_temperature_init=config["loss"].get("contrastive_temperature_init", 0.07),
+        label_smoothing=config["loss"].get("label_smoothing", 0.0),
+        aux_lambda=config["loss"].get("aux_lambda", 0.1),
     )
     logger.info("Loss function initialized")
 

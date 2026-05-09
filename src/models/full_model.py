@@ -12,9 +12,9 @@ from src.models.text_encoder import TextEncoder
 from src.models.image_encoder import ImageEncoder
 from src.models.metadata_encoder import MetadataEncoder
 from src.models.projection import ModalityProjection, ModalityDropout
-from src.models.cross_attention import DualCrossAttention
+from src.models.cross_attention import DualBidirectionalCrossAttention, SelectiveCrossAttention
 from src.models.gated_fusion import GatedFusion
-from src.models.classification_head import ClassificationHead
+from src.models.classification_head import ClassificationHead, build_auxiliary_head
 
 logger = logging.getLogger(__name__)
 
@@ -156,11 +156,29 @@ class MultimodalMisinfoDetector(nn.Module):
                 "[MultimodalMisinfoDetector] mode='full_no_attention': "
                 "DualCrossAttention NOT instantiated"
             )
-        else:
-            self.dual_cross_attn = DualCrossAttention(
+        elif cfg_model.get("use_selective_attention", True):
+            self.dual_cross_attn = SelectiveCrossAttention(
                 embed_dim=proj_dim,
                 num_heads=num_attn_heads,
                 dropout=attn_dropout,
+                gate_init_logit=cfg_model.get("attn_gate_init_logit", -2.0),
+                attn_init_scale=cfg_model.get("attn_init_scale", 0.1),
+                use_residual=cfg_model.get("attention_use_residual", True),
+                sample_gate_hidden=cfg_model.get("sample_gate_hidden", 64),
+                sample_gate_init_bias=cfg_model.get("sample_gate_init_bias", -1.0),
+            )
+            logger.info(
+                "[MultimodalMisinfoDetector] Using SelectiveCrossAttention "
+                "(per-sample + per-dim gating)"
+            )
+        else:
+            self.dual_cross_attn = DualBidirectionalCrossAttention(
+                embed_dim=proj_dim,
+                num_heads=num_attn_heads,
+                dropout=attn_dropout,
+            )
+            logger.info(
+                "[MultimodalMisinfoDetector] Using plain DualBidirectionalCrossAttention"
             )
 
         # Gated fusion, or parameter-free sum fusion for the no-gating ablation.
@@ -177,7 +195,21 @@ class MultimodalMisinfoDetector(nn.Module):
 
         # Classification head
         self.classifier = ClassificationHead(
-            in_dim=proj_dim, dropout=head_dropout
+            in_dim=proj_dim, dropout=head_dropout, config=config
+        )
+
+        # Auxiliary heads operate on pre-attention modality projections.
+        aux_dropout = cfg_model.get("aux_dropout", 0.2)
+        self.aux_text_head = build_auxiliary_head(proj_dim, aux_dropout, config)
+        self.aux_image_head = build_auxiliary_head(proj_dim, aux_dropout, config)
+        self.aux_meta_head = build_auxiliary_head(proj_dim, aux_dropout, config)
+        n_aux_params = sum(
+            p.numel()
+            for head in (self.aux_text_head, self.aux_image_head, self.aux_meta_head)
+            for p in head.parameters()
+        )
+        logger.info(
+            f"Added 3 auxiliary modality heads ({n_aux_params:,} parameters)"
         )
 
         if self.ablation_mode == "full_no_dropout":
@@ -284,11 +316,13 @@ class MultimodalMisinfoDetector(nn.Module):
         i_proj = self.image_proj(image_emb)  # (B, 256) with requires_grad=True
         m_proj = self.meta_proj(m_raw)  # (B, 256)
 
-        # Zero-mask missing images AFTER projection
+        # Zero-mask missing images AFTER projection.
+        # Avoid in-place writes here because projected tensors participate in
+        # auxiliary and contrastive losses during backpropagation.
         missing_image_mask = torch.tensor(
             batch["missing_image"], dtype=torch.bool, device=device
         )  # (B,)
-        i_proj[missing_image_mask] = 0.0  # Zero out missing image embeddings
+        i_proj = i_proj.masked_fill(missing_image_mask.unsqueeze(-1), 0.0)
 
         # Apply modality dropout — returns BOTH masked embeddings AND validity masks
         # (skip for full_no_modality_dropout mode)
@@ -298,6 +332,14 @@ class MultimodalMisinfoDetector(nn.Module):
             (t_proj, i_proj, m_proj), (t_valid, i_valid, m_valid) = self.modality_dropout(
                 t_proj, i_proj, m_proj
             )
+
+        # Contrastive loss needs both text and image to be present. Missing
+        # images are already encoded in i_valid by ModalityDropout because the
+        # projected image vector is zero before dropout.
+        if t_valid is None or i_valid is None:
+            contrastive_valid = None
+        else:
+            contrastive_valid = t_valid & i_valid
 
         # === ABLATION LOGIC: Handle different modes ===
         is_multimodal = self.ablation_mode in (
@@ -349,6 +391,10 @@ class MultimodalMisinfoDetector(nn.Module):
         # Classification head
         logits = self.classifier(fused)  # (B, 1)
 
+        aux_text_logits = self.aux_text_head(t_proj) if is_multimodal else None
+        aux_image_logits = self.aux_image_head(i_proj) if is_multimodal else None
+        aux_meta_logits = self.aux_meta_head(m_proj) if is_multimodal else None
+
         return {
             "logits": logits,
             "t_proj": t_proj if self.ablation_mode in (
@@ -368,7 +414,10 @@ class MultimodalMisinfoDetector(nn.Module):
             ) else None,
             "t_prime": t_prime,  # None in unimodal modes
             "i_prime": i_prime,  # None in unimodal modes
-            "image_valid": i_valid if is_multimodal else None,  # None in unimodal modes
+            "aux_text_logits": aux_text_logits,
+            "aux_image_logits": aux_image_logits,
+            "aux_meta_logits": aux_meta_logits,
+            "image_valid": contrastive_valid if is_multimodal else None,  # None in unimodal modes
             "is_multimodal": is_multimodal,  # Flag for loss and trainer
         }
 

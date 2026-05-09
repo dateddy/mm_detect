@@ -15,15 +15,21 @@ import timm
 from typing import Dict
 
 from .components import MetadataMLP
+from .classification_head import build_auxiliary_head, initialize_classifier_prior_bias
 from .text_encoder import TextEncoder
 
 
 class _BimodalBase(nn.Module):
     """Shared logic for bimodal models — concat-based fusion."""
     
-    def _build_classifier(self, proj_dim: int, dropout: float = 0.3):
+    def _build_classifier(
+        self,
+        proj_dim: int,
+        dropout: float = 0.3,
+        config: Dict | None = None,
+    ):
         """Build classification head."""
-        return nn.Sequential(
+        classifier = nn.Sequential(
             nn.Linear(proj_dim, 128),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -32,6 +38,8 @@ class _BimodalBase(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(64, 1),
         )
+        initialize_classifier_prior_bias(classifier, config)
+        return classifier
     
     def _build_simple_fusion(self, proj_dim: int):
         """Concat 2 modalities (2*proj_dim) and project back to proj_dim."""
@@ -105,7 +113,12 @@ class TextImageModel(_BimodalBase):
         self.gated_fusion = self._build_simple_fusion(proj_dim)
         
         # === Classifier ===
-        self.classifier = self._build_classifier(proj_dim, cfg_model.get("classifier_dropout", 0.3))
+        self.classifier = self._build_classifier(
+            proj_dim, cfg_model.get("classifier_dropout", 0.3), config
+        )
+        aux_dropout = cfg_model.get("aux_dropout", 0.2)
+        self.aux_text_head = build_auxiliary_head(proj_dim, aux_dropout, config)
+        self.aux_image_head = build_auxiliary_head(proj_dim, aux_dropout, config)
         
         # Explicitly None for factory verification
         self.metadata_encoder = None
@@ -115,14 +128,20 @@ class TextImageModel(_BimodalBase):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for text+image model."""
         # Text encoding
-        text_repr = self.text_encoder(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-        )
+        if "text_emb" in batch:
+            text_repr = batch["text_emb"]
+        else:
+            text_repr = self.text_encoder(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+            )
         t_proj = self.text_proj(text_repr)
         
         # Image encoding
-        image_repr = self.image_encoder(batch["pixel_values"])
+        if "image_emb" in batch:
+            image_repr = batch["image_emb"]
+        else:
+            image_repr = self.image_encoder(batch["pixel_values"])
         i_proj = self.image_proj(image_repr)
         
         # Concat fusion
@@ -135,6 +154,8 @@ class TextImageModel(_BimodalBase):
             "logits": logits,
             "t_proj": t_proj,
             "i_proj": i_proj,
+            "aux_text_logits": self.aux_text_head(t_proj),
+            "aux_image_logits": self.aux_image_head(i_proj),
         }
     
     def transition_to_phase2(self, k: int = 4):
@@ -157,6 +178,12 @@ class TextImageModel(_BimodalBase):
                 params.append(p)
         
         return params
+
+    def unfreeze_encoders(self, top_k: int) -> None:
+        """Trainer-compatible encoder unfreeze hook."""
+        self.text_encoder.unfreeze_top_k(top_k)
+        for p in self.transition_to_phase2(top_k):
+            p.requires_grad = True
     
     def count_parameters(self, trainable_only: bool = False) -> int:
         """Count total or trainable parameters."""
@@ -227,7 +254,12 @@ class TextMetadataModel(_BimodalBase):
         self.gated_fusion = self._build_simple_fusion(proj_dim)
         
         # === Classifier ===
-        self.classifier = self._build_classifier(proj_dim, cfg_model.get("classifier_dropout", 0.3))
+        self.classifier = self._build_classifier(
+            proj_dim, cfg_model.get("classifier_dropout", 0.3), config
+        )
+        aux_dropout = cfg_model.get("aux_dropout", 0.2)
+        self.aux_text_head = build_auxiliary_head(proj_dim, aux_dropout, config)
+        self.aux_meta_head = build_auxiliary_head(proj_dim, aux_dropout, config)
         
         # Explicitly None for factory verification
         self.image_encoder = None
@@ -237,10 +269,13 @@ class TextMetadataModel(_BimodalBase):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for text+metadata model."""
         # Text encoding
-        text_repr = self.text_encoder(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-        )
+        if "text_emb" in batch:
+            text_repr = batch["text_emb"]
+        else:
+            text_repr = self.text_encoder(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+            )
         t_proj = self.text_proj(text_repr)
         
         # Metadata encoding
@@ -257,6 +292,8 @@ class TextMetadataModel(_BimodalBase):
             "logits": logits,
             "t_proj": t_proj,
             "m_proj": m_proj,
+            "aux_text_logits": self.aux_text_head(t_proj),
+            "aux_meta_logits": self.aux_meta_head(m_proj),
         }
     
     def transition_to_phase2(self, k: int = 4):
@@ -272,6 +309,10 @@ class TextMetadataModel(_BimodalBase):
                 params.append(p)
         
         return params
+
+    def unfreeze_encoders(self, top_k: int) -> None:
+        """Trainer-compatible encoder unfreeze hook."""
+        self.text_encoder.unfreeze_top_k(top_k)
     
     def count_parameters(self, trainable_only: bool = False) -> int:
         """Count total or trainable parameters."""
@@ -347,7 +388,12 @@ class ImageMetadataModel(_BimodalBase):
         self.gated_fusion = self._build_simple_fusion(proj_dim)
         
         # === Classifier ===
-        self.classifier = self._build_classifier(proj_dim, cfg_model.get("classifier_dropout", 0.3))
+        self.classifier = self._build_classifier(
+            proj_dim, cfg_model.get("classifier_dropout", 0.3), config
+        )
+        aux_dropout = cfg_model.get("aux_dropout", 0.2)
+        self.aux_image_head = build_auxiliary_head(proj_dim, aux_dropout, config)
+        self.aux_meta_head = build_auxiliary_head(proj_dim, aux_dropout, config)
         
         # Explicitly None for factory verification
         self.text_encoder = None
@@ -357,7 +403,10 @@ class ImageMetadataModel(_BimodalBase):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for image+metadata model."""
         # Image encoding
-        image_repr = self.image_encoder(batch["pixel_values"])
+        if "image_emb" in batch:
+            image_repr = batch["image_emb"]
+        else:
+            image_repr = self.image_encoder(batch["pixel_values"])
         i_proj = self.image_proj(image_repr)
         
         # Metadata encoding
@@ -374,6 +423,8 @@ class ImageMetadataModel(_BimodalBase):
             "logits": logits,
             "i_proj": i_proj,
             "m_proj": m_proj,
+            "aux_image_logits": self.aux_image_head(i_proj),
+            "aux_meta_logits": self.aux_meta_head(m_proj),
         }
     
     def transition_to_phase2(self, k: int = 4):
@@ -388,6 +439,11 @@ class ImageMetadataModel(_BimodalBase):
                 params.append(p)
         
         return params
+
+    def unfreeze_encoders(self, top_k: int) -> None:
+        """Trainer-compatible encoder unfreeze hook."""
+        for p in self.transition_to_phase2(top_k):
+            p.requires_grad = True
     
     def count_parameters(self, trainable_only: bool = False) -> int:
         """Count total or trainable parameters."""

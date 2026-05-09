@@ -63,6 +63,7 @@ def build_optimizer_phase1(model, loss_fn, config: dict) -> Tuple[AdamW, Dict[st
     # ===== COLLECT TRAINABLE PARAMETERS BY COMPONENT =====
     fusion_head_params = []
     classifier_params = []
+    aux_params = []
     param_group_index = {}
     
     for name, param in model.named_parameters():
@@ -71,7 +72,10 @@ def build_optimizer_phase1(model, loss_fn, config: dict) -> Tuple[AdamW, Dict[st
             continue
         
         # Fusion + Projection + Metadata components
-        if any(prefix in name for prefix in [
+        if "aux_" in name and "_head" in name:
+            aux_params.append(param)
+
+        elif any(prefix in name for prefix in [
             "metadata_encoder",
             "text_proj",
             "image_proj", 
@@ -114,10 +118,12 @@ def build_optimizer_phase1(model, loss_fn, config: dict) -> Tuple[AdamW, Dict[st
     # ===== LOGGING: Parameter counts by component =====
     n_fusion = sum(p.numel() for p in fusion_head_params)
     n_cls = sum(p.numel() for p in classifier_params)
+    n_aux = sum(p.numel() for p in aux_params)
     
     logger.info(
         f"[Phase 1 Optimizer] Trainable parameters:"
-        f" fusion+proj+meta={n_fusion:,} | classifier={n_cls:,} | temperature={len(temperature_params)}"
+        f" fusion+proj+meta={n_fusion:,} | classifier={n_cls:,} | "
+        f"aux_heads={n_aux:,} | temperature={len(temperature_params)}"
     )
     
     # ===== CREATE PARAMETER GROUPS =====
@@ -151,6 +157,16 @@ def build_optimizer_phase1(model, loss_fn, config: dict) -> Tuple[AdamW, Dict[st
             "name": "classifier",
         },
     ]
+
+    if aux_params:
+        param_groups.append(
+            {
+                "params": aux_params,
+                "lr": config["training"].get("lr_fusion", 3.0e-4) * 1.5,
+                "weight_decay": config["training"].get("weight_decay", 0.01) * 0.5,
+                "name": "aux_heads",
+            }
+        )
 
     if temperature_params:
         param_groups.append(
