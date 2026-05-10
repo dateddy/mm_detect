@@ -7,6 +7,7 @@ output_dir: outputs/ablation_text_only
 
 loss:
   contrastive_lambda: 0.0
+  label_smoothing: 0.0
 
 training:
   modality_dropout: 0.0
