@@ -632,6 +632,10 @@ def prepare_data_split_comprehensive(raw_csv_path: str, output_dir: str,
                                     apply_feature_engineering: bool = True) -> dict:
     """
     Prepare data comprehensively and create train/val/test splits WITH ALL FEATURES.
+    NOTE (FIX_SESSION_02 A.0): scripts/prepare_data.py::main() does not call this
+    helper; main delegates split generation to
+    src.data.preprocessing.run_preprocessing_pipeline(), which is canonical for
+    data/processed/splits/*.csv writes.
     
     Args:
         raw_csv_path: Path to raw CSV file.
@@ -726,9 +730,9 @@ def prepare_data_split_comprehensive(raw_csv_path: str, output_dir: str,
     val_path = splits_dir / "val.csv"
     test_path = splits_dir / "test.csv"
     
-    train_df.to_csv(train_path, index=False, float_format='%.0f')
-    val_df.to_csv(val_path, index=False, float_format='%.0f')
-    test_df.to_csv(test_path, index=False, float_format='%.0f')
+    train_df.to_csv(train_path, index=False)
+    val_df.to_csv(val_path, index=False)
+    test_df.to_csv(test_path, index=False)
     
     logger.info(f"\n  ✓ Train split: {train_path} ({len(train_df)} rows, {len(train_df.columns)} columns)")
     logger.info(f"  ✓ Val split: {val_path} ({len(val_df)} rows, {len(val_df.columns)} columns)")
@@ -898,10 +902,9 @@ def main():
     logger.info("=" * 70)
     
     engineered_features = {
-        "Core Metadata (9)": [
+        "Core Metadata (8)": [
             "ads_per_page", "platform_count", "FB_only_flag", "all_targeted",
             "burstiness", "avg_ad_duration", "launch_delay", "num_countries",
-            "language_location_mismatch"
         ],
         "Text-Based (3)": [
             "emojis_in_text", "emoji_count", "text_length"
@@ -917,7 +920,7 @@ def main():
         ],
         "Demographic": [
             "age_span", "num_countries", "women_targeted", "men_targeted",
-            "all_targeted", "language_location_mismatch"
+            "all_targeted"
         ],
         "Platform": [
             "platform_count", "FB_only_flag", "IG_only_flag"

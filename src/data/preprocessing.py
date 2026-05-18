@@ -2,6 +2,7 @@
 """Data preprocessing pipeline for multimodal misinformation detection."""
 
 import argparse
+import ast
 import logging
 import pickle
 import re
@@ -9,7 +10,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import joblib
 import numpy as np
 import pandas as pd
 import torch
@@ -20,7 +20,7 @@ from sklearn.model_selection import train_test_split
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.data.feature_engineering import engineer_all_features, engineer_row_features, engineer_page_features
+from src.data.feature_engineering import engineer_all_features, engineer_row_features, engineer_page_features, compute_url_count
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,8 @@ def fit_metadata_scaler(
     processed_path.mkdir(parents=True, exist_ok=True)
 
     scaler_path = processed_path / "metadata_scaler.pkl"
-    joblib.dump(scaler, scaler_path)
+    with open(scaler_path, "wb") as f:
+        pickle.dump(scaler, f)
 
     logger.info(f"Fitted and saved metadata scaler to {scaler_path}")
 
@@ -456,6 +457,22 @@ def clean_text(df: pd.DataFrame, text_columns: List[str], preserve_raw: bool = F
         
         # Step 1: Fill NaN with empty string for uniform processing
         df_cleaned[col] = df_cleaned[col].fillna("")
+
+        # Step 1.5: Parse list-like strings (e.g., "['a', 'b']") before normalization
+        def _parse_list_like_text(text):
+            if not isinstance(text, str):
+                return text
+            stripped = text.strip()
+            if stripped.startswith("["):
+                try:
+                    items = ast.literal_eval(stripped)
+                    if isinstance(items, (list, tuple)):
+                        return " ".join(str(x) for x in items)
+                except (ValueError, SyntaxError):
+                    pass
+            return text
+
+        df_cleaned[col] = df_cleaned[col].apply(_parse_list_like_text)
         
         # Step 2: Lowercase
         df_cleaned[col] = df_cleaned[col].str.lower()
@@ -624,8 +641,14 @@ def run_preprocessing_pipeline(config: Dict,
 
     # Step 2: Load raw CSV
     logger.info(f"Loading raw CSV from {raw_csv}")
-    df_raw = pd.read_csv(raw_csv)
+    df_raw = pd.read_csv(raw_csv, dtype={"id": str, "page_id": str})
     logger.info(f"Loaded {len(df_raw)} rows, {len(df_raw.columns)} columns")
+
+    # Deduplicate by ID (scientific-notation / repeated-row artifacts)
+    n_before = len(df_raw)
+    df_raw = df_raw.drop_duplicates(subset="id", keep="first").reset_index(drop=True)
+    n_dropped = n_before - len(df_raw)
+    logger.info(f"FIX-001: dropped {n_dropped} duplicate IDs")
     
     # === LABEL VALIDATION: Drop rows with null misinformation label ===
     if "misinformation" in df_raw.columns:
@@ -649,7 +672,12 @@ def run_preprocessing_pipeline(config: Dict,
             df_raw[col] = pd.to_datetime(df_raw[col], errors='coerce')
     logger.info(f"Parsed {len(datetime_columns)} datetime columns")
 
-    # Step 4: Clean text
+    # Step 4: Pre-compute url_count on raw text (before URL stripping in clean_text)
+    if "ad_creative_bodies" in df_raw.columns:
+        df_raw["url_count"] = compute_url_count(df_raw)
+        logger.info("Precomputed 'url_count' from raw ad_creative_bodies before clean_text")
+
+    # Step 5: Clean text
     logger.info(f"Cleaning text in {len(text_columns)} columns...")
     df_raw = clean_text(df_raw, text_columns)
     logger.info(f"Text cleaning complete â€” {len(text_columns)} columns cleaned (lowercase, URLs/HTML/tags removed, whitespace normalized)")
@@ -705,19 +733,23 @@ def run_preprocessing_pipeline(config: Dict,
     test_df = engineer_page_features(test_df, reference_df=train_df)
     logger.info(f"Page-level features engineered successfully")
 
-    # Step 8: Fit and apply metadata scaler on training split ONLY
+    # Step 8: Fit metadata scaler on training split ONLY, then apply to ALL splits
     logger.info("Step 8: Fitting metadata scaler on training split only...")
     scaler = fit_metadata_scaler(train_df, metadata_features, processed_dir)
 
-    # Apply scaler to val and test
+    # Apply train-fitted scaler to all three splits
+    logger.info("Applying scaler to train split...")
+    train_df = apply_metadata_scaler(train_df, metadata_features, scaler)
     logger.info("Applying scaler to val split...")
     val_df = apply_metadata_scaler(val_df, metadata_features, scaler)
     logger.info("Applying scaler to test split...")
     test_df = apply_metadata_scaler(test_df, metadata_features, scaler)
-    logger.info("Applied metadata scaler to all splits")
+    logger.info("Applied metadata scaler to all three splits (train/val/test)")
 
     # Step 9: Save split CSVs
     logger.info("Step 9: Saving split CSVs...")
+    # FIX_SESSION_02 A.0: main() in scripts/prepare_data.py delegates to this
+    # function, so this is the canonical writer for data/processed/splits/*.csv.
 
     splits_dir = processed_path / "splits"
     splits_dir.mkdir(parents=True, exist_ok=True)
@@ -848,7 +880,6 @@ if __name__ == "__main__":
             "avg_ad_duration",
             "launch_delay",
             "num_countries",
-            "language_location_mismatch",
         ],
     }
 
