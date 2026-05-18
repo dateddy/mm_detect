@@ -16,11 +16,11 @@ class MetadataEncoder(nn.Module):
     Transforms tabular metadata features into a 256-dimensional embedding
     using progressive layer expansion with BatchNorm, GELU, and Dropout.
 
-    Gradual expansion design (13→64→128→256) with expansion ratios:
-    - 1st layer: 4.9× (13→64)
+    Gradual expansion design (16→64→128→256) with expansion ratios:
+    - 1st layer: 4.0× (16→64)
     - 2nd layer: 2.0× (64→128)
     - 3rd layer: 2.0× (128→256)
-    Much more reasonable than immediate 19.7× jump (13→256).
+    Much more reasonable than immediate 16.0× jump (16→256).
 
     Includes residual connection from input to output for improved gradient flow.
 
@@ -28,14 +28,14 @@ class MetadataEncoder(nn.Module):
     tabular data than large immediate expansions.
 
     Attributes:
-        input_dim: Input feature dimension (default: 13 metadata features)
+        input_dim: Input feature dimension (default: 16 metadata features)
         output_dim: Output embedding dimension (default: 256)
         hidden_dims: List of hidden layer dimensions (default: [64, 128])
     """
 
     def __init__(
         self,
-        input_dim: int = 13,
+        input_dim: int = 16,
         output_dim: int = 256,
         hidden_dims: list | None = None,
         dropout: float = 0.1,
@@ -44,10 +44,10 @@ class MetadataEncoder(nn.Module):
         Initialize MetadataEncoder with gradual expansion.
 
         Args:
-            input_dim: Number of input metadata features (default: 13).
+            input_dim: Number of input metadata features (default: 16).
             output_dim: Dimension of output embedding (default: 256).
             hidden_dims: List of hidden layer dimensions (default: [64, 128]).
-                        If None, uses [64, 128] for gradual 13→64→128→256 expansion.
+                        If None, uses [64, 128] for gradual 16→64→128→256 expansion.
         """
         super().__init__()
 

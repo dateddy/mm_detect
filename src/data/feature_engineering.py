@@ -2,6 +2,7 @@
 """Feature engineering for multimodal misinformation detection."""
 
 import argparse
+import ast
 import json
 import logging
 import re
@@ -206,11 +207,20 @@ def compute_fb_only_flag(df: pd.DataFrame) -> pd.Series:
 
         s = str(s).strip().lower()
 
-        # Try JSON list
+        # Try Python literal list first (handles single quotes from raw CSV)
+        try:
+            platforms = ast.literal_eval(s)
+            if isinstance(platforms, list):
+                platforms = [str(p).lower().strip() for p in platforms]
+                return 1 if all(p == "facebook" for p in platforms) and platforms else 0
+        except (ValueError, SyntaxError):
+            pass
+
+        # Fallback: JSON list
         try:
             platforms = json.loads(s)
             if isinstance(platforms, list):
-                platforms = [p.lower().strip() for p in platforms]
+                platforms = [str(p).lower().strip() for p in platforms]
                 return 1 if all(p == "facebook" for p in platforms) and platforms else 0
         except json.JSONDecodeError:
             pass
@@ -444,73 +454,12 @@ def compute_num_countries(df: pd.DataFrame) -> pd.Series:
 
 def compute_language_location_mismatch(df: pd.DataFrame) -> pd.Series:
     """
-    Return 1 if ad language list contains a language not commonly spoken in target_locations.
-
-    Return 0 otherwise. Handles parse errors gracefully.
-
-    Args:
-        df: DataFrame with 'ad_languages' and 'target_locations' columns.
-
-    Returns:
-        Series of binary mismatch flags.
+    DEPRECATED (2026-05-19, FIX_SESSION_02 / ISSUE-012 Option C).
+    Feature removed from active metadata set due to unreliable country-name
+    format alignment in target_locations vs COUNTRY_LANGUAGES mapping.
+    Preserved for history; intentionally inert.
     """
-    if "ad_languages" not in df.columns or "target_locations" not in df.columns:
-        logger.warning("Required columns for language_location_mismatch missing, returning 0s")
-        return pd.Series(0, index=df.index)
-
-    def has_mismatch(row: pd.Series) -> int:
-        langs = row["ad_languages"]
-        locs = row["target_locations"]
-
-        # Parse languages
-        ad_langs = set()
-        if pd.notna(langs):
-            s = str(langs).strip().lower()
-            try:
-                langs_list = json.loads(s)
-                ad_langs = set(l.lower().strip() for l in langs_list)
-            except json.JSONDecodeError:
-                if "," in s:
-                    ad_langs = set(l.strip().lower() for l in s.split(","))
-                elif s:
-                    ad_langs = {s}
-
-        # Parse locations
-        target_countries = set()
-        if pd.notna(locs):
-            s = str(locs).strip().upper()
-            try:
-                locs_list = json.loads(s)
-                target_countries = set(c.upper().strip() for c in locs_list)
-            except json.JSONDecodeError:
-                if "," in s:
-                    target_countries = set(
-                        c.strip().upper() for c in s.split(",")
-                    )
-                elif s:
-                    target_countries = {s}
-
-        if not ad_langs or not target_countries:
-            return 0
-
-        # Collect languages spoken in target countries
-        spoken_langs = set()
-        for country in target_countries:
-            if country in COUNTRY_LANGUAGES:
-                spoken_langs.update(COUNTRY_LANGUAGES[country])
-
-        # Check for mismatch
-        if not spoken_langs:
-            return 0
-
-        # 1 if any ad language is not in spoken languages
-        for lang in ad_langs:
-            if lang not in spoken_langs:
-                return 1
-
-        return 0
-
-    return df.apply(has_mismatch, axis=1)
+    return pd.Series(0, index=df.index)
 
 
 # ============================================================================
@@ -806,7 +755,7 @@ def compute_url_count(df: pd.DataFrame) -> pd.Series:
     if "ad_creative_bodies" not in df.columns:
         logger.warning("ad_creative_bodies column not found, returning 0s")
         return pd.Series(0, index=df.index)
-    
+
     def count(text):
         if pd.isna(text) or not text:
             return 0
@@ -814,7 +763,7 @@ def compute_url_count(df: pd.DataFrame) -> pd.Series:
         # Pattern: http:// or https:// followed by non-whitespace
         matches = re.findall(r'https?://\S+', text)
         return len(matches)
-    
+
     return df["ad_creative_bodies"].apply(count).fillna(0)
 
 
@@ -877,7 +826,6 @@ def engineer_all_features(df: pd.DataFrame,
         "avg_ad_duration": compute_avg_ad_duration(df_out),
         "launch_delay": compute_launch_delay(df_out),
         "num_countries": compute_num_countries(df_out),
-        "language_location_mismatch": compute_language_location_mismatch(df_out),
     }
 
     for feature_name, feature_series in core_features.items():
@@ -997,7 +945,6 @@ def engineer_row_features(df: pd.DataFrame) -> pd.DataFrame:
     - FB_only_flag: Binary flag if only on Facebook
     - all_targeted: Binary flag if all ads are targeted
     - num_countries: Number of target countries
-    - language_location_mismatch: Language-location mismatch flag
     - text_length: Character count of ad text
     - emoji_count: Count of emojis
     - exclamation_ratio: Ratio of exclamation marks
@@ -1029,8 +976,10 @@ def engineer_row_features(df: pd.DataFrame) -> pd.DataFrame:
         
         df_out["repeated_punct_count"] = compute_repeated_punct_count(df_out)
         features_added.append("repeated_punct_count")
-        
-        df_out["url_count"] = compute_url_count(df_out)
+
+        # url_count may be precomputed from raw text in preprocessing pipeline.
+        if "url_count" not in df_out.columns:
+            df_out["url_count"] = compute_url_count(df_out)
         features_added.append("url_count")
     
     # === Row-level metadata features ===
@@ -1049,9 +998,6 @@ def engineer_row_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df_out["num_countries"] = compute_num_countries(df_out)
     features_added.append("num_countries")
-    
-    df_out["language_location_mismatch"] = compute_language_location_mismatch(df_out)
-    features_added.append("language_location_mismatch")
     
     # === Text features (on cleaned text) ===
     logger.info("Computing text-based features...")
@@ -1474,7 +1420,8 @@ def create_gender_flags(gender_str: str) -> Tuple[int, int, int]:
 
 def check_language_location_mismatch(row: pd.Series) -> int:
     """
-    Check for language-location mismatch (red flag for scams).
+    DEPRECATED (2026-05-19, FIX_SESSION_02 / ISSUE-012 Option C).
+    Preserved for git history; intentionally inert.
     
     Args:
         row: DataFrame row with 'languages' and 'target_locations' columns.
@@ -1482,11 +1429,7 @@ def check_language_location_mismatch(row: pd.Series) -> int:
     Returns:
         1 if mismatch detected, 0 otherwise.
     """
-    langs_present = 1 if pd.notna(row.get('languages')) and str(row.get('languages', '')).strip() else 0
-    locs_present = 1 if pd.notna(row.get('target_locations')) and str(row.get('target_locations', '')).strip() else 0
-    
-    # Mismatch if only one is present
-    return 1 if (langs_present + locs_present == 1) else 0
+    return 0
 
 
 def compute_demographic_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -1514,9 +1457,6 @@ def compute_demographic_features(df: pd.DataFrame) -> pd.DataFrame:
         df[['women_targeted', 'men_targeted', 'all_targeted']] = df['target_gender'].apply(
             lambda x: pd.Series(create_gender_flags(x))
         )
-    
-    # Language-location mismatch
-    df['language_location_mismatch'] = df.apply(check_language_location_mismatch, axis=1)
     
     logger.debug("Computed demographic features")
     
@@ -1660,7 +1600,6 @@ if __name__ == "__main__":
         "avg_ad_duration",
         "launch_delay",
         "num_countries",
-        "language_location_mismatch",
     ]
 
     available_features = [f for f in metadata_features if f in df_engineered.columns]

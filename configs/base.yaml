@@ -15,7 +15,7 @@ paths:
   images_dir: data/raw/ad_images/
   processed_dir: data/processed/
   embeddings_dir: data/embeddings/
-  metadata_scaler: data/processed/metadata_scaler.joblib
+  metadata_scaler: data/processed/metadata_scaler.pkl
   output_dir: outputs/
   log_dir: outputs/logs/
   checkpoint_dir: experiments/
@@ -51,7 +51,7 @@ model:
   attention_dropout: 0.1
   classifier_dropout: 0.3
   
-  metadata_input_dim: 17
+  metadata_input_dim: 16
 
 # ========================================
 # Metadata feature engineering
@@ -65,7 +65,6 @@ metadata_features:
   - avg_ad_duration
   - launch_delay
   - num_countries
-  - language_location_mismatch
   - emoji_count
   - text_length
   - ads_duration

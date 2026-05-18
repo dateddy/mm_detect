@@ -33,7 +33,7 @@ def create_dummy_batch(batch_size: int = 4) -> dict:
         "input_ids": torch.randint(0, 1000, (batch_size, 64)),
         "attention_mask": torch.ones((batch_size, 64), dtype=torch.long),
         "pixel_values": torch.randn(batch_size, 3, 224, 224),
-        "metadata": torch.randn(batch_size, 17),
+        "metadata": torch.randn(batch_size, 16),
         "missing_image": [False] * batch_size,
         "label": torch.randint(0, 2, (batch_size,)).float(),
     }
@@ -56,8 +56,7 @@ def test_ablation_mode(ablation_mode: str):
         "metadata_features": [
             "ads_per_page", "platform_count", "FB_only_flag", "all_targeted",
             "burstiness", "avg_ad_duration", "launch_delay", "num_countries",
-            "language_location_mismatch", "emoji_count", "text_length",
-            "ads_duration", "repeated_text_ratio", "exclamation_ratio",
+            "emoji_count", "text_length", "ads_duration", "repeated_text_ratio", "exclamation_ratio",
             "caps_word_ratio", "repeated_punct_count", "url_count"
         ],
     }
