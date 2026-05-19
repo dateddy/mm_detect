@@ -57,6 +57,20 @@ class DualCrossAttention(nn.Module):
             batch_first=True,
         )
 
+        # --- RESTORATION: stabilization trio (FIX_SESSION_04, ISSUE-020) ---
+        # 1. LayerNorm for per-arm strong residuals
+        self.norm_text = nn.LayerNorm(embed_dim)
+        self.norm_image = nn.LayerNorm(embed_dim)
+
+        # 2. Learnable per-dimension gates (sigmoid(-2.0) ≈ 0.12 at init)
+        self.gate_text = nn.Parameter(torch.full((embed_dim,), -2.0))
+        self.gate_image = nn.Parameter(torch.full((embed_dim,), -2.0))
+
+        # 3. Output projection x0.1 init for near-identity start
+        self.attn_text_to_image.out_proj.weight.data *= 0.1
+        self.attn_image_to_text.out_proj.weight.data *= 0.1
+        # --- END RESTORATION ---
+
         logger.info(
             f"Initialized DualCrossAttention "
             f"(embed_dim={embed_dim}, num_heads={num_heads}, dropout={dropout})"
@@ -90,10 +104,12 @@ class DualCrossAttention(nn.Module):
         else:
             kv_all = torch.stack([t_proj, i_proj, m_proj], dim=1)  # (B, 3, 256)
 
-        t_prime, _ = self.attn_text_to_image(
+        t_attn, _ = self.attn_text_to_image(
             q_text, kv_all, kv_all
         )
-        t_prime = t_prime.squeeze(1)  # (B, 256)
+        t_attn = t_attn.squeeze(1)  # (B, 256)
+        t_gated = torch.sigmoid(self.gate_text) * t_attn
+        t_prime = self.norm_text(t_proj + t_gated)
 
         # Branch B: Image → Text + Image + Metadata
         #   Query: Image (B, 1, 256)
@@ -104,9 +120,11 @@ class DualCrossAttention(nn.Module):
         else:
             kv_all = torch.stack([t_proj, i_proj, m_proj], dim=1)  # (B, 3, 256)
 
-        i_prime, _ = self.attn_image_to_text(
+        i_attn, _ = self.attn_image_to_text(
             q_image, kv_all, kv_all
         )
-        i_prime = i_prime.squeeze(1)  # (B, 256)
+        i_attn = i_attn.squeeze(1)  # (B, 256)
+        i_gated = torch.sigmoid(self.gate_image) * i_attn
+        i_prime = self.norm_image(i_proj + i_gated)
 
         return t_prime, i_prime
