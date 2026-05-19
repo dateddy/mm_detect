@@ -1,4 +1,4 @@
-# 02 · FIXES — Applied Changes Log
+﻿# 02 Â· FIXES â€” Applied Changes Log
 
 > Chronological record of every change applied during audit recovery.
 > Every entry must list risks accepted BEFORE the fix was made.
@@ -17,7 +17,51 @@ Before logging a fix here, the corresponding ISSUE must have:
 
 ## Fix Entries (newest at top)
 
-### FIX-SESSION_04 · Restore fusion stabilization trio (ISSUE-020) · 2026-05-19
+### FIX-SESSION_05 · ISSUE-021 Options B + D · 2026-05-19
+
+- **Resolves**: ISSUE-021
+- **Component**: losses + model/config
+- **Files changed**:
+  - `src/losses/contrastive.py` (Option B)
+  - `src/models/full_model.py` (Option D, Case 2)
+  - `configs/base.yaml` (Option D config keys)
+
+- **Change summary**:
+  Implemented a two-part mitigation for contrastive-mask leakage:
+  1. Added joint norm-based validity masking in `InfoNCELoss.forward()` so zeroed text/image embeddings are excluded even if upstream mask is incomplete.
+  2. Disabled text modality dropout specifically while preserving image/metadata dropout via split config keys.
+
+- **Diff snippet** (key changes only):
+  ```python
+  # Option B: src/losses/contrastive.py
+  _norm_mask = (text_emb.norm(dim=-1) > 1e-3) & (image_emb.norm(dim=-1) > 1e-3)
+  valid_mask = valid_mask & _norm_mask if valid_mask is not None else _norm_mask
+
+  # Option D: src/models/full_model.py + configs/base.yaml
+  text_modality_dropout_p = cfg_training.get("text_modality_dropout_p", 0.0)
+  image_modality_dropout_p = cfg_training.get("image_modality_dropout_p", modality_dropout_p)
+  self.modality_dropout = ModalityDropout(p=image_modality_dropout_p)
+  t_valid = torch.ones(t_proj.shape[0], dtype=torch.bool, device=t_proj.device)  # text dropout off
+  (i_proj, m_proj), (i_valid, m_valid) = self.modality_dropout(i_proj, m_proj)
+  ```
+
+- **Risks accepted**:
+  - Fewer valid contrastive pairs per batch when zeroed embeddings are excluded (intended).
+  - Minor reduction in text-path regularization from disabling text dropout (accepted for stability).
+
+- **Verification**:
+  - Option B CPU synthetic forward: finite losses with zeroed text embeddings; no NaN.
+  - Option D config check: `training.text_modality_dropout_p == 0.0`, `training.image_modality_dropout_p == 0.15`.
+  - Combined check: InfoNCE remains finite with partial zeroed text embeddings.
+
+- **Commits**:
+  - `c944daa` — `fix(ISSUE-021 B): add norm-based joint valid_mask in InfoNCELoss`
+  - `b0f7119` — `fix(ISSUE-021 D): disable text modality dropout`
+
+- **Rollback plan**:
+  - `git revert c944daa`
+  - `git revert b0f7119`
+### FIX-SESSION_04 Â· Restore fusion stabilization trio (ISSUE-020) Â· 2026-05-19
 
 - **Resolves**: ISSUE-020
 - **Component**: model / fusion
@@ -25,7 +69,7 @@ Before logging a fix here, the corresponding ISSUE must have:
   - `src/models/cross_attention.py`
 
 - **Change summary**:
-  Restored the missing fusion stabilization trio in active `DualCrossAttention`: strong per-arm residual with LayerNorm, per-dimension learnable gates initialized to `-2.0`, and output projection weight scaling (`×0.1`) at init.
+  Restored the missing fusion stabilization trio in active `DualCrossAttention`: strong per-arm residual with LayerNorm, per-dimension learnable gates initialized to `-2.0`, and output projection weight scaling (`Ã—0.1`) at init.
 
 - **Diff snippet** (key change only):
   ```python
@@ -57,7 +101,7 @@ Before logging a fix here, the corresponding ISSUE must have:
 - **Rollback plan**:
   `git revert 9c27c8c`
 
-### FIX-SESSION_02 · Phase 1 closeout (ISSUE-015 + ISSUE-012) · 2026-05-19
+### FIX-SESSION_02 Â· Phase 1 closeout (ISSUE-015 + ISSUE-012) Â· 2026-05-19
 
 - **Resolves**: ISSUE-015, ISSUE-012
 - **Component**: data + metadata-dim cascade
@@ -82,7 +126,7 @@ Before logging a fix here, the corresponding ISSUE must have:
   - Train scaling check: `ads_per_page median=0.000, IQR=1.000`
   - Config check: `metadata_input_dim=16`, `len(metadata_features)=16`
   - Scaler check: `pickle.load(data/processed/metadata_scaler.pkl)` succeeds, `feature_names_in_` length = 16
-  - Forward check: `MetadataEncoder()(torch.randn(8,16))` → `(8, 256)`
+  - Forward check: `MetadataEncoder()(torch.randn(8,16))` â†’ `(8, 256)`
 
 - **Side effects observed**:
   - Windows console logging shows UnicodeEncodeError for some symbol characters in log messages, but preprocessing run completed successfully.
@@ -91,7 +135,7 @@ Before logging a fix here, the corresponding ISSUE must have:
   - `git revert caf7a4b`
   - `git revert 13cb755`
 
-### FIX-SESSION_01 · Phase 1 data layer remediation · 2026-05-18
+### FIX-SESSION_01 Â· Phase 1 data layer remediation Â· 2026-05-18
 
 - **Resolves**: ISSUE-009, ISSUE-013, ISSUE-014, ISSUE-016
 - **Partially addresses**: ISSUE-012 (column fixed; still zero due to location format)
@@ -132,22 +176,22 @@ Before logging a fix here, the corresponding ISSUE must have:
   - Pre-fix reported F1 invalidated
 
 - **Verification**:
-  Inline terminal assertions (FIX_SESSION_01 verification) — all passed.
+  Inline terminal assertions (FIX_SESSION_01 verification) â€” all passed.
 
 - **Side effects observed**:
-  `language_location_mismatch` still zero (likely target_locations format). Scaling still unscaled after regen (ISSUE‑015 persists).
+  `language_location_mismatch` still zero (likely target_locations format). Scaling still unscaled after regen (ISSUEâ€‘015 persists).
 
 - **Rollback plan**:
   `git reset --hard 61a50dfb80dbc64c163f1e5fbb16f93cce2d3d62`
 
 <!-- Template:
 
-### FIX-NNN · [Short title] · YYYY-MM-DD
+### FIX-NNN Â· [Short title] Â· YYYY-MM-DD
 
 - **Resolves**: ISSUE-NNN
 - **Component**: data / model / training / eval / ablation / repro
 - **Files changed**:
-  - `path/to/file.py` (lines XX–YY)
+  - `path/to/file.py` (lines XXâ€“YY)
   - `path/to/config.yaml`
 
 - **Change summary**:
@@ -183,7 +227,7 @@ Before logging a fix here, the corresponding ISSUE must have:
 ---
 -->
 
-_(empty — will be populated as fixes are applied)_
+_(empty â€” will be populated as fixes are applied)_
 
 ---
 
@@ -191,6 +235,8 @@ _(empty — will be populated as fixes are applied)_
 
 | Fix # | Date | Component | Severity resolved | Risks accepted |
 |---|---|---|---|---|
+| FIX-SESSION_05 | 2026-05-19 | losses + model/config | HIGH | fewer InfoNCE pairs, reduced text-dropout regularization |
 | FIX-SESSION_04 | 2026-05-19 | model / fusion | HIGH | intended fusion-dynamics change on retrain |
 | FIX-SESSION_02 | 2026-05-19 | data + config/model cascade | CRITICAL + HIGH | checkpoint incompatibility, splits regen |
 | FIX-SESSION_01 | 2026-05-18 | data | HIGH | dup drop, split regen, text shift |
+

@@ -1,4 +1,4 @@
-# 01 · OPEN ISSUES — Discovered Problems
+﻿# 01 Â· OPEN ISSUES â€” Discovered Problems
 
 > Append-only log of issues found during audit. Move to FIXES.md when resolved.
 > Newest issues at top.
@@ -7,24 +7,65 @@
 
 ## Severity Legend
 
-- **CRITICAL** — affects validity of results / paper claims. Must fix before paper submission.
-- **HIGH** — affects correctness of a major component but may not invalidate results.
-- **MEDIUM** — code quality / maintainability / minor drift from intent.
-- **LOW** — cosmetic, optimization, nice-to-have.
+- **CRITICAL** â€” affects validity of results / paper claims. Must fix before paper submission.
+- **HIGH** â€” affects correctness of a major component but may not invalidate results.
+- **MEDIUM** â€” code quality / maintainability / minor drift from intent.
+- **LOW** â€” cosmetic, optimization, nice-to-have.
 
 ## Status Legend
 
-- `OPEN` — discovered, not yet addressed
-- `INVESTIGATING` — currently being analyzed in a check
-- `DECISION_PENDING` — need to choose fix strategy + accept risks
-- `FIX_IN_PROGRESS` — fix being applied
-- `RESOLVED` — moved to FIXES.md
+- `OPEN` â€” discovered, not yet addressed
+- `INVESTIGATING` â€” currently being analyzed in a check
+- `DECISION_PENDING` â€” need to choose fix strategy + accept risks
+- `FIX_IN_PROGRESS` â€” fix being applied
+- `RESOLVED` â€” moved to FIXES.md
 
 ---
 
 ## Active Issues
 
-### ISSUE-020 · Fusion stabilization trio missing in active DualCrossAttention
+### ISSUE-021 · InfoNCE valid_mask is image-only in active training path
+
+- **Discovered in**: CHECK_09
+- **Severity**: HIGH
+- **Status**: RESOLVED
+- **Component**: losses / training
+- **Description**:
+  InfoNCE supports `valid_mask` filtering, but the active trainer path prioritizes
+  `output["image_valid"]` from the model, and model output exposes only `i_valid`
+  (image modality validity). This means samples with dropped text embeddings can still
+  be treated as valid for contrastive loss if image remains valid.
+
+- **Impact**:
+  The 2026-05-05 intent was to exclude modality-dropout-zeroed samples from InfoNCE.
+  Current behavior appears partial, potentially injecting noisy contrastive pairs and
+  weakening alignment signal.
+
+- **Evidence**:
+  - `src/models/full_model.py:298-300` computes `(t_valid, i_valid, m_valid)` but returns only `"image_valid": i_valid` at `src/models/full_model.py:371`.
+  - `src/training/trainer.py:407-411` and `426-430` pass `output["image_valid"]` preferentially to loss, falling back to batch `valid_mask` only when image_valid is None.
+  - `src/losses/contrastive.py:103-107` then filters using that mask.
+
+- **Reproducer**:
+  ```bash
+  rg -n "image_valid|valid_mask|modality_dropout" src/models/full_model.py src/training/trainer.py src/losses/contrastive.py
+  ```
+
+- **Resolution (FIX_SESSION_05, 2026-05-19)**:
+  - Option B (`src/losses/contrastive.py`): added norm-based joint validity inside `InfoNCELoss.forward()`:
+    - `_norm_mask = (||text_emb|| > 1e-3) & (||image_emb|| > 1e-3)`
+    - `valid_mask` is ANDed with `_norm_mask` (or replaced by it when None)
+  - Option D (`configs/base.yaml`, `src/models/full_model.py`): disabled text modality dropout while preserving image/metadata dropout:
+    - `training.text_modality_dropout_p: 0.0`
+    - `training.image_modality_dropout_p: 0.15`
+    - full model now applies modality dropout to image/metadata only.
+  - Commits:
+    - `c944daa` fix(ISSUE-021 B)
+    - `b0f7119` fix(ISSUE-021 D)
+  - Verified by CPU-only synthetic checks (Option B, Option D, combined).
+
+---
+### ISSUE-020 Â· Fusion stabilization trio missing in active DualCrossAttention
 
 - **Discovered in**: CHECK_08 (post-FIX_SESSION_03 rerun)
 - **Severity**: HIGH
@@ -35,7 +76,7 @@
   2026-05-05 fusion fixes claimed in Drift Log:
   - strong residual (`LayerNorm(input + attn_output)`) is absent
   - per-dimension learnable gates (`theta` init `-2.0`) are absent
-  - explicit output-projection init scaling (`×0.1`) is absent
+  - explicit output-projection init scaling (`Ã—0.1`) is absent
 
 - **Impact**:
   Reported architecture claims for the 2026-05-05 F1 jump are only partially represented in active code.
@@ -60,7 +101,7 @@
 
 ---
 
-### ISSUE-019 · CRITICAL FIX REVERTED — cross-attention K/V self-reference missing
+### ISSUE-019 Â· CRITICAL FIX REVERTED â€” cross-attention K/V self-reference missing
 
 - **Discovered in**: CHECK_08 (abort at Step 2)
 - **Severity**: CRITICAL
@@ -82,15 +123,15 @@
 
 - **Reproducer**:
 ```bash
-  # read-only — confirm K/V construction:
+  # read-only â€” confirm K/V construction:
   grep -A 5 "kv_image_metadata\|kv_text_metadata" src/models/cross_attention.py
-  # Should show: torch.stack([i_proj, m_proj]...)  ← WRONG
-  # Should be:   torch.stack([t_proj, i_proj, m_proj]...) ← CORRECT
+  # Should show: torch.stack([i_proj, m_proj]...)  â† WRONG
+  # Should be:   torch.stack([t_proj, i_proj, m_proj]...) â† CORRECT
 ```
 
 - **Risks if not fixed before retrain**:
-  - `validity_threat` — paper F1 unreproducible
-  - `cascade` — all downstream ablation results potentially invalid
+  - `validity_threat` â€” paper F1 unreproducible
+  - `cascade` â€” all downstream ablation results potentially invalid
 
 - **Resolution (FIX_SESSION_03, 2026-05-19)**:
   - Restored self-inclusive K/V in active code path:
@@ -101,7 +142,7 @@
 
 ---
 
-### ISSUE-018 · full_model ablation mode guard conflicts with unimodal branches/tests
+### ISSUE-018 Â· full_model ablation mode guard conflicts with unimodal branches/tests
 
 - **Discovered in**: CHECK_07
 - **Severity**: MEDIUM
@@ -121,7 +162,7 @@
 
 ---
 
-### ISSUE-016 · List-like text fields not parsed
+### ISSUE-016 Â· List-like text fields not parsed
 
 - **Discovered in**: CHECK_04
 - **Severity**: MEDIUM
@@ -140,7 +181,7 @@
 
 ---
 
-### ISSUE-015 · Split CSV artifacts are unscaled (confirmed)
+### ISSUE-015 Â· Split CSV artifacts are unscaled (confirmed)
 
 - **Discovered in**: CHECK_04
 - **Severity**: CRITICAL
@@ -187,14 +228,14 @@
 
 ---
 
-### ISSUE-014 · FB_only_flag degenerate (all zeros)
+### ISSUE-014 Â· FB_only_flag degenerate (all zeros)
 
 - **Discovered in**: CHECK_04
 - **Severity**: MEDIUM
 - **Status**: RESOLVED
 - **Component**: data / features
 - **Description**:
-  `FB_only_flag` is always 0 in train split. `publisher_platforms` is stored as list‑like strings with single quotes (invalid JSON), so `json.loads` fails and fallback logic does not detect facebook‑only pages.
+  `FB_only_flag` is always 0 in train split. `publisher_platforms` is stored as listâ€‘like strings with single quotes (invalid JSON), so `json.loads` fails and fallback logic does not detect facebookâ€‘only pages.
 
 - **Impact**:
   Feature provides no signal; drift from intent.
@@ -221,7 +262,7 @@
 
 ---
 
-### ISSUE-013 · url_count always zero (clean_text order)
+### ISSUE-013 Â· url_count always zero (clean_text order)
 
 - **Discovered in**: CHECK_04
 - **Severity**: HIGH
@@ -255,7 +296,7 @@
 
 ---
 
-### ISSUE-012 · language_location_mismatch uses wrong column name
+### ISSUE-012 Â· language_location_mismatch uses wrong column name
 
 - **Discovered in**: CHECK_04
 - **Severity**: HIGH
@@ -293,7 +334,7 @@
 
 ---
 
-### ISSUE-017 · Significant null rates in feature-relevant columns (renumbered from duplicate ISSUE-012)
+### ISSUE-017 Â· Significant null rates in feature-relevant columns (renumbered from duplicate ISSUE-012)
 
 - **Discovered in**: CHECK_03
 - **Severity**: MEDIUM
@@ -304,15 +345,15 @@
 
 - **Resolution (CHECK_04 Section 8 audit)**:
   Null handling verified explicitly:
-  - target_gender null → all_targeted=1 fallback
-  - target_locations null → 0 for num_countries / language_location_mismatch (latter now dropped per Option C)
-  - languages null → unused after ISSUE-012 Option C
-  - ad_delivery_stop_time null (18%) → fills with current date in compute_avg_ad_duration; ads_duration returns 0
-  - ad_creative_bodies null (2.6%) → clean_text fills then restores NA; text features return 0
+  - target_gender null â†’ all_targeted=1 fallback
+  - target_locations null â†’ 0 for num_countries / language_location_mismatch (latter now dropped per Option C)
+  - languages null â†’ unused after ISSUE-012 Option C
+  - ad_delivery_stop_time null (18%) â†’ fills with current date in compute_avg_ad_duration; ads_duration returns 0
+  - ad_creative_bodies null (2.6%) â†’ clean_text fills then restores NA; text features return 0
 
 - **Note**: renumbered from duplicate ISSUE-012 number to maintain append-only discipline per AUDIT_RULES R7.
 
-### ISSUE-011 · Null label present in raw CSV
+### ISSUE-011 Â· Null label present in raw CSV
 
 - **Discovered in**: CHECK_03
 - **Severity**: LOW
@@ -336,7 +377,7 @@
 
 ---
 
-### ISSUE-010 · Image coverage below 95%
+### ISSUE-010 Â· Image coverage below 95%
 
 - **Discovered in**: CHECK_03
 - **Severity**: MEDIUM
@@ -363,19 +404,19 @@
 
 ---
 
-### ISSUE-009 · ID duplication + scientific-notation mismatch
+### ISSUE-009 Â· ID duplication + scientific-notation mismatch
 
 - **Discovered in**: CHECK_03
 - **Severity**: HIGH
 - **Status**: RESOLVED
 - **Component**: data
 - **Description**:
-  `id` has 6 duplicate values (unique IDs < total rows). Preprocessing reads CSV with default dtype (no explicit string enforcement), and `fix_csv_ids.py` is a manual script not integrated into the pipeline. Scientific‑notation IDs remain possible.
+  `id` has 6 duplicate values (unique IDs < total rows). Preprocessing reads CSV with default dtype (no explicit string enforcement), and `fix_csv_ids.py` is a manual script not integrated into the pipeline. Scientificâ€‘notation IDs remain possible.
 
 - **Resolution (FIX_SESSION_01 + 02, 2026-05-18/19)**:
   - dtype={'id': str, 'page_id': str} enforced in preprocessing read_csv
   - drop_duplicates(subset='id', keep='first') added immediately after load
-  - Post-regen: train=10,874, val=3,296, test=2,501 (raw 16,678 − 1 null − 6 dups = 16,671 ✓)
+  - Post-regen: train=10,874, val=3,296, test=2,501 (raw 16,678 âˆ’ 1 null âˆ’ 6 dups = 16,671 âœ“)
 
 - **Impact**:
   Resolved. ID type drift eliminated; duplicate rows removed.
@@ -392,7 +433,7 @@
 
 ---
 
-### ISSUE-008 · scripts/preprocess.py appears stale/broken
+### ISSUE-008 Â· scripts/preprocess.py appears stale/broken
 
 - **Discovered in**: CHECK_02
 - **Severity**: MEDIUM
@@ -411,7 +452,7 @@
 
 ---
 
-### ISSUE-001 · Undocumented __main__ entry points in src modules
+### ISSUE-001 Â· Undocumented __main__ entry points in src modules
 
 - **Discovered in**: CHECK_01
 - **Severity**: HIGH
@@ -433,7 +474,7 @@
 
 ---
 
-### ISSUE-002 · Potential duplicate/legacy encoder modules under src/models/encoders
+### ISSUE-002 Â· Potential duplicate/legacy encoder modules under src/models/encoders
 
 - **Discovered in**: CHECK_01
 - **Severity**: MEDIUM
@@ -450,7 +491,7 @@
   # read-only: compare encoder files under src/models/ and src/models/encoders/
   ```
 
-### ISSUE-003 · Duplicate preprocessing files: preprocessing.py vs preprocessing_fixed.py
+### ISSUE-003 Â· Duplicate preprocessing files: preprocessing.py vs preprocessing_fixed.py
 
 - **Discovered in**: CHECK_01
 - **Severity**: HIGH
@@ -460,7 +501,7 @@
   `train.py` and most scripts import `src.data.preprocessing`, while `preprocessing_fixed.py` is used only in tests (`test_metadata_scaling.py`, `test_learnable_temperature.py`). Two distinct pipelines exist with different scaling logic.
 
 - **Impact**:
-  If the “fixed” scaling is the intended path, current training results may not reflect it.
+  If the â€œfixedâ€ scaling is the intended path, current training results may not reflect it.
 
 - **Reproducer**:
   ```bash
@@ -470,9 +511,9 @@
   ```
 
 - **Hypothesized cause** (optional):
-  A late‑April refactor introduced a separate scaling pipeline for tests.
+  A lateâ€‘April refactor introduced a separate scaling pipeline for tests.
 
-### ISSUE-004 · "FIX N" remediation history not documented
+### ISSUE-004 Â· "FIX N" remediation history not documented
 - Discovered in: CHECK_01
 - Severity: HIGH
 - Status: OPEN
@@ -481,7 +522,7 @@
 - Impact: reproducibility threat; may have lost track of architectural decisions.
 - Risk categories: reproducibility, validity_threat
 
-### ISSUE-005 · Encoder/fusion subdirs appear unused (legacy)
+### ISSUE-005 Â· Encoder/fusion subdirs appear unused (legacy)
 
 - **Discovered in**: CHECK_01
 - **Severity**: MEDIUM
@@ -499,7 +540,7 @@
   Select-String -Path .\**\*.py -Pattern "from src.models.encoders|from src.models.fusion"
   ```
 
-### ISSUE-006 · Unreferenced config files (possible dead or dynamic)
+### ISSUE-006 Â· Unreferenced config files (possible dead or dynamic)
 - Discovered in: CHECK_01
 - Severity: MEDIUM
 - Status: OPEN
@@ -507,7 +548,7 @@
 - Description: configs/training/default.yaml, configs/training/fast_debug.yaml, configs/ablation_*.yaml (top-level) not referenced by any entry point per grep. May be loaded via dynamic mechanism (Hydra, importlib), or dead.
 - Risk categories: validity_threat (if active with wrong values), maintenance
 
-### ISSUE-007 · High-churn files = drift risk concentration
+### ISSUE-007 Â· High-churn files = drift risk concentration
 - Discovered in: CHECK_01
 - Severity: HIGH (informational; concrete issues to be discovered in later checks)
 - Status: INVESTIGATING
@@ -519,7 +560,7 @@
 
 <!-- Template:
 
-### ISSUE-NNN · [Short title]
+### ISSUE-NNN Â· [Short title]
 
 - **Discovered in**: CHECK_NN
 - **Severity**: CRITICAL | HIGH | MEDIUM | LOW
@@ -544,4 +585,5 @@
 ---
 -->
 
-_(empty — will be populated by audit checks)_
+_(empty â€” will be populated by audit checks)_
+
