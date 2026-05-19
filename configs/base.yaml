@@ -93,6 +93,8 @@ training:
   unfreeze_top_k_blocks: 4
   
   modality_dropout: 0.15
+  text_modality_dropout_p: 0.0
+  image_modality_dropout_p: 0.15
   gradient_clip: 1.0
   use_amp: true
   device: cuda
