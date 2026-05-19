@@ -17,6 +17,46 @@ Before logging a fix here, the corresponding ISSUE must have:
 
 ## Fix Entries (newest at top)
 
+### FIX-SESSION_04 · Restore fusion stabilization trio (ISSUE-020) · 2026-05-19
+
+- **Resolves**: ISSUE-020
+- **Component**: model / fusion
+- **Files changed**:
+  - `src/models/cross_attention.py`
+
+- **Change summary**:
+  Restored the missing fusion stabilization trio in active `DualCrossAttention`: strong per-arm residual with LayerNorm, per-dimension learnable gates initialized to `-2.0`, and output projection weight scaling (`×0.1`) at init.
+
+- **Diff snippet** (key change only):
+  ```python
+  # Added in __init__
+  self.norm_text = nn.LayerNorm(embed_dim)
+  self.norm_image = nn.LayerNorm(embed_dim)
+  self.gate_text = nn.Parameter(torch.full((embed_dim,), -2.0))
+  self.gate_image = nn.Parameter(torch.full((embed_dim,), -2.0))
+  self.attn_text_to_image.out_proj.weight.data *= 0.1
+  self.attn_image_to_text.out_proj.weight.data *= 0.1
+
+  # Added in forward
+  t_prime = self.norm_text(t_proj + torch.sigmoid(self.gate_text) * t_attn)
+  i_prime = self.norm_image(i_proj + torch.sigmoid(self.gate_image) * i_attn)
+  ```
+
+- **Risks accepted**:
+  - Fusion behavior and training dynamics will change on next retrain (intended and required for architecture parity with Drift Log claims).
+
+- **Verification**:
+  ```bash
+  python verify_issue020.py
+  ```
+  Result: all 6 checks passed (shape invariance, gate init values, residual behavior, output-proj scaling, LayerNorm presence, import sanity).
+
+- **Side effects observed**:
+  - Added verification artifact `verify_issue020.py` in repo root (not part of model runtime path).
+
+- **Rollback plan**:
+  `git revert 9c27c8c`
+
 ### FIX-SESSION_02 · Phase 1 closeout (ISSUE-015 + ISSUE-012) · 2026-05-19
 
 - **Resolves**: ISSUE-015, ISSUE-012
@@ -151,5 +191,6 @@ _(empty — will be populated as fixes are applied)_
 
 | Fix # | Date | Component | Severity resolved | Risks accepted |
 |---|---|---|---|---|
+| FIX-SESSION_04 | 2026-05-19 | model / fusion | HIGH | intended fusion-dynamics change on retrain |
 | FIX-SESSION_02 | 2026-05-19 | data + config/model cascade | CRITICAL + HIGH | checkpoint incompatibility, splits regen |
 | FIX-SESSION_01 | 2026-05-18 | data | HIGH | dup drop, split regen, text shift |

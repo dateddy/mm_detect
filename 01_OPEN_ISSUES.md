@@ -24,6 +24,103 @@
 
 ## Active Issues
 
+### ISSUE-020 · Fusion stabilization trio missing in active DualCrossAttention
+
+- **Discovered in**: CHECK_08 (post-FIX_SESSION_03 rerun)
+- **Severity**: HIGH
+- **Status**: RESOLVED
+- **Component**: model / fusion
+- **Description**:
+  After ISSUE-019 was fixed, active `src/models/cross_attention.py` still lacks 3 of the 4
+  2026-05-05 fusion fixes claimed in Drift Log:
+  - strong residual (`LayerNorm(input + attn_output)`) is absent
+  - per-dimension learnable gates (`theta` init `-2.0`) are absent
+  - explicit output-projection init scaling (`×0.1`) is absent
+
+- **Impact**:
+  Reported architecture claims for the 2026-05-05 F1 jump are only partially represented in active code.
+  This is a reproducibility/validity risk for future retraining and paper-method consistency.
+
+- **Reproducer**:
+  ```bash
+  rg -n "LayerNorm|gate|sigmoid|Parameter|out_proj|0\\.1|xavier|kaiming" src/models/cross_attention.py
+  ```
+
+- **Resolution (FIX_SESSION_04, 2026-05-19)**:
+  - Added per-arm strong residual in `DualCrossAttention`:
+    - `t_prime = norm_text(t_proj + sigmoid(gate_text) * t_attn)`
+    - `i_prime = norm_image(i_proj + sigmoid(gate_image) * i_attn)`
+  - Added per-dimension learnable gates:
+    - `gate_text`, `gate_image` as `nn.Parameter(torch.full((embed_dim,), -2.0))`
+  - Added output projection stabilization init:
+    - `attn_text_to_image.out_proj.weight *= 0.1`
+    - `attn_image_to_text.out_proj.weight *= 0.1`
+  - Commit: `9c27c8c`
+  - Verified by: `python verify_issue020.py` (all 6 checks passed on CPU synthetic forward)
+
+---
+
+### ISSUE-019 · CRITICAL FIX REVERTED — cross-attention K/V self-reference missing
+
+- **Discovered in**: CHECK_08 (abort at Step 2)
+- **Severity**: CRITICAL
+- **Status**: RESOLVED
+- **Component**: model / cross-attention
+- **Description**:
+  Active `DualCrossAttention.forward()` had reverted to:
+  - Text query: K/V = `torch.stack([i_proj, m_proj], dim=1)` (K=[i,m])
+  - Image query: K/V = `torch.stack([t_proj, m_proj], dim=1)` (K=[t,m])
+  which removed self-reference.
+
+- **Impact**: CRITICAL
+  - Was a direct architecture regression risk for retraining reproducibility.
+
+- **Hypothesized cause**:
+  High-churn commits on `src/models/cross_attention.py` (part of ISSUE-007 pattern).
+  A coding agent likely reverted the self-reference change while making other edits,
+  without recognizing this was the CRITICAL architectural fix.
+
+- **Reproducer**:
+```bash
+  # read-only — confirm K/V construction:
+  grep -A 5 "kv_image_metadata\|kv_text_metadata" src/models/cross_attention.py
+  # Should show: torch.stack([i_proj, m_proj]...)  ← WRONG
+  # Should be:   torch.stack([t_proj, i_proj, m_proj]...) ← CORRECT
+```
+
+- **Risks if not fixed before retrain**:
+  - `validity_threat` — paper F1 unreproducible
+  - `cascade` — all downstream ablation results potentially invalid
+
+- **Resolution (FIX_SESSION_03, 2026-05-19)**:
+  - Restored self-inclusive K/V in active code path:
+    - text query arm now uses `kv_all = torch.stack([t_proj, i_proj, m_proj], dim=1)`
+    - image query arm now uses `kv_all = torch.stack([t_proj, i_proj, m_proj], dim=1)`
+  - Commit: `bd5f4ab` (`fix(ISSUE-019): restore K/V self-reference in DualCrossAttention`)
+  - Verified via CPU forward shape checks and zero-modal self-reference behavior.
+
+---
+
+### ISSUE-018 · full_model ablation mode guard conflicts with unimodal branches/tests
+
+- **Discovered in**: CHECK_07
+- **Severity**: MEDIUM
+- **Status**: OPEN
+- **Component**: model / ablation / repro
+- **Description**:
+  `MultimodalMisinfoDetector` validates `ablation_mode` against only `full*` modes (`src/models/full_model.py:66-73`), but `forward()` still includes `text_only/image_only/metadata_only` branches (`src/models/full_model.py:333-343`), and `scripts/test_ablation_mode.py` directly instantiates `MultimodalMisinfoDetector` with unimodal modes.
+
+- **Impact**:
+  Direct full-model unimodal ablation tests can fail with mode-validation errors or rely on stale/unreachable branches. This increases confusion about canonical ablation entry points (factory vs direct class).
+
+- **Reproducer**:
+  ```bash
+  # read-only static evidence
+  rg -n "valid_modes|text_only|image_only|metadata_only" src/models/full_model.py scripts/test_ablation_mode.py
+  ```
+
+---
+
 ### ISSUE-016 · List-like text fields not parsed
 
 - **Discovered in**: CHECK_04
@@ -196,13 +293,24 @@
 
 ---
 
-### ISSUE-012 · Significant null rates in feature-relevant columns
-- Discovered in: CHECK_03
-- Severity: MEDIUM (depends on C04 finding)
-- Status: INVESTIGATING
-- Component: data / features
-- Description: 4 columns used as inputs to the 17 features have non-trivial null rates: target_locations (6%), languages (5%), target_gender/ages (3%), ad_delivery_stop_time (18.2%). C04 must verify how preprocessing handles these nulls.
-- Risk categories: correctness, validity_threat
+### ISSUE-017 · Significant null rates in feature-relevant columns (renumbered from duplicate ISSUE-012)
+
+- **Discovered in**: CHECK_03
+- **Severity**: MEDIUM
+- **Status**: RESOLVED
+- **Component**: data / features
+- **Description**:
+  4 columns used as inputs to the 17 features have non-trivial null rates: target_locations (6%), languages (5%), target_gender/ages (3%), ad_delivery_stop_time (18.2%).
+
+- **Resolution (CHECK_04 Section 8 audit)**:
+  Null handling verified explicitly:
+  - target_gender null → all_targeted=1 fallback
+  - target_locations null → 0 for num_countries / language_location_mismatch (latter now dropped per Option C)
+  - languages null → unused after ISSUE-012 Option C
+  - ad_delivery_stop_time null (18%) → fills with current date in compute_avg_ad_duration; ads_duration returns 0
+  - ad_creative_bodies null (2.6%) → clean_text fills then restores NA; text features return 0
+
+- **Note**: renumbered from duplicate ISSUE-012 number to maintain append-only discipline per AUDIT_RULES R7.
 
 ### ISSUE-011 · Null label present in raw CSV
 
@@ -259,28 +367,28 @@
 
 - **Discovered in**: CHECK_03
 - **Severity**: HIGH
-- **Status**: FIX_IN_PROGRESS
+- **Status**: RESOLVED
 - **Component**: data
 - **Description**:
   `id` has 6 duplicate values (unique IDs < total rows). Preprocessing reads CSV with default dtype (no explicit string enforcement), and `fix_csv_ids.py` is a manual script not integrated into the pipeline. Scientific‑notation IDs remain possible.
 
-- **Mini-check (2026-05-18)**:
-  - dtype enforcement + dedup added in preprocessing
-  - post‑regen train rows: 10,874
+- **Resolution (FIX_SESSION_01 + 02, 2026-05-18/19)**:
+  - dtype={'id': str, 'page_id': str} enforced in preprocessing read_csv
+  - drop_duplicates(subset='id', keep='first') added immediately after load
+  - Post-regen: train=10,874, val=3,296, test=2,501 (raw 16,678 − 1 null − 6 dups = 16,671 ✓)
 
 - **Impact**:
-  Can cause incorrect image matching, orphan images, and sample duplication in training.
+  Resolved. ID type drift eliminated; duplicate rows removed.
 
-- **Reproducer**:
-  ```bash
-  # read-only
-  python - <<'PY'
+- **Reproducer** (for verification):
+```bash
+  python -c "
   import pandas as pd
-  df = pd.read_csv('data/raw/ads_vietnam_clean.csv', encoding='utf-8')
-  print('duplicates:', len(df) - df['id'].nunique())
-  print(df['id'].astype(str).head())
-  PY
-  ```
+  train = pd.read_csv('data/processed/splits/train.csv', dtype={'id':str})
+  assert train['id'].nunique() == len(train), 'No dups expected'
+  print('Train id unique check passed')
+  "
+```
 
 ---
 
