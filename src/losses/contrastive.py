@@ -95,6 +95,18 @@ class InfoNCELoss(nn.Module):
         torch.Tensor
             Scalar loss tensor with requires_grad=True for training.
         """
+        # --- FIX_SESSION_05 Option B: joint norm-based valid_mask (ISSUE-021) ---
+        # Compute which samples have non-degenerate embeddings in BOTH modalities.
+        # This catches text-dropout-zeroed samples the upstream image_valid mask misses.
+        _text_ok = text_emb.norm(dim=-1) > 1e-3
+        _image_ok = image_emb.norm(dim=-1) > 1e-3
+        _norm_mask = _text_ok & _image_ok
+        if valid_mask is not None:
+            valid_mask = valid_mask & _norm_mask
+        else:
+            valid_mask = _norm_mask
+        # --- END FIX ---
+
         # 1. Clamp logit_scale BEFORE using it (CLIP does this every forward pass)
         # This prevents runaway scaling during training
         with torch.no_grad():
