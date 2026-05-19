@@ -81,31 +81,31 @@ class DualCrossAttention(nn.Module):
             - t_prime: Text after attending to Image(+Metadata), shape (batch_size, 256)
             - i_prime: Image after attending to Text(+Metadata), shape (batch_size, 256)
         """
-        # Branch A: Text → Image + Metadata
+        # Branch A: Text → Text + Image + Metadata
         #   Query: Text (B, 1, 256)
-        #   Key/Value: [Image, Metadata] (B, 2, 256)
+        #   Key/Value: [Text, Image, Metadata] (B, 3, 256)
         q_text = t_proj.unsqueeze(1)  # (B, 1, 256)
         if m_proj is None:
-            kv_image_metadata = i_proj.unsqueeze(1)  # (B, 1, 256)
+            kv_all = i_proj.unsqueeze(1)  # (B, 1, 256)
         else:
-            kv_image_metadata = torch.stack([i_proj, m_proj], dim=1)  # (B, 2, 256)
+            kv_all = torch.stack([t_proj, i_proj, m_proj], dim=1)  # (B, 3, 256)
 
         t_prime, _ = self.attn_text_to_image(
-            q_text, kv_image_metadata, kv_image_metadata
+            q_text, kv_all, kv_all
         )
         t_prime = t_prime.squeeze(1)  # (B, 256)
 
-        # Branch B: Image → Text + Metadata
+        # Branch B: Image → Text + Image + Metadata
         #   Query: Image (B, 1, 256)
-        #   Key/Value: [Text, Metadata] (B, 2, 256)
+        #   Key/Value: [Text, Image, Metadata] (B, 3, 256)
         q_image = i_proj.unsqueeze(1)  # (B, 1, 256)
         if m_proj is None:
-            kv_text_metadata = t_proj.unsqueeze(1)  # (B, 1, 256)
+            kv_all = t_proj.unsqueeze(1)  # (B, 1, 256)
         else:
-            kv_text_metadata = torch.stack([t_proj, m_proj], dim=1)  # (B, 2, 256)
+            kv_all = torch.stack([t_proj, i_proj, m_proj], dim=1)  # (B, 3, 256)
 
         i_prime, _ = self.attn_image_to_text(
-            q_image, kv_text_metadata, kv_text_metadata
+            q_image, kv_all, kv_all
         )
         i_prime = i_prime.squeeze(1)  # (B, 256)
 
