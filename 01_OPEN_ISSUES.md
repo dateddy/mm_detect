@@ -24,6 +24,85 @@
 
 ## Active Issues
 
+### ISSUE-023 · Trainer-level modality dropout still drops text and compounds with model dropout
+
+- **Discovered in**: CHECK_11
+- **Severity**: HIGH
+- **Status**: RESOLVED
+- **Component**: training / modality dropout
+- **Description**:
+  FIX_SESSION_05 Option D disabled text dropout inside `MultimodalMisinfoDetector`, but the
+  active training path still calls `Trainer.apply_modality_dropout()` before model forward.
+  That trainer-level dropout can choose `"text"` and zero raw `input_ids` / `attention_mask`.
+  The model then applies a second embedding-level `ModalityDropout` to image and metadata.
+
+- **Impact**:
+  The full training pipeline does not satisfy the intended "text dropout disabled" behavior.
+  Image dropout can also compound across raw trainer dropout and model embedding dropout.
+  In full mode, random raw image dropout is approximately `0.15 * 1/2 = 0.075`, then model
+  image dropout applies at `0.15`, for roughly `21.4%` effective random image zeroing before
+  structural missing images are considered.
+
+- **Evidence**:
+  - Trainer applies raw modality dropout before forward: `src/training/trainer.py:391-392`
+  - Trainer still includes text as droppable: `src/training/trainer.py:213-215`
+  - Trainer text zeroing path: `src/training/trainer.py:232-238`
+  - Model-level text dropout is disabled: `src/models/full_model.py:313-315`
+  - Model-level image/metadata dropout remains active: `src/models/full_model.py:315`
+
+- **Reproducer**:
+  ```bash
+  rg -n "apply_modality_dropout|droppable.append\\(\"text\"\\)|input_ids\\]\\[mask_i\\]|self.modality_dropout\\(i_proj, m_proj\\)" src/training/trainer.py src/models/full_model.py
+  ```
+
+- **Resolution (FIX_SESSION_06, 2026-05-20)**:
+  - Removed trainer-loop call site so `Trainer.apply_modality_dropout()` is no longer executed in active training:
+    - deleted call in `src/training/trainer.py` train loop (line previously at ~392)
+  - Kept model-level dropout as the single active mechanism:
+    - `self.modality_dropout(i_proj, m_proj)` remains in `src/models/full_model.py`
+  - Verification:
+    - `rg` shows `apply_modality_dropout(` appears only at method definition
+    - AST static check confirms zero call sites
+    - import sanity: `src.training.trainer` and `src.models.full_model` import successfully
+  - Commit:
+    - `d8a6ad4` — `fix(ISSUE-023 B): remove trainer-level apply_modality_dropout call from train loop`
+
+---
+
+### ISSUE-022 · Phase 2 warmup is metadata-only (no effective LR warmup)
+
+- **Discovered in**: CHECK_10
+- **Severity**: HIGH
+- **Status**: OPEN (DEFERRED)
+- **Component**: training / scheduler
+- **Description**:
+  Drift Log claims a separate Phase 2 warmup was added, but active trainer/scheduler path
+  does not apply a second warmup ramp after encoder unfreeze. At transition, the code sets
+  `phase2_start_step` and `phase2_warmup_steps` metadata and updates `scheduler.base_lrs`
+  for encoder groups, but does not instantiate/apply any separate warmup schedule.
+
+- **Impact**:
+  Encoder LR may jump directly into the ongoing global LambdaLR trajectory after unfreeze,
+  which can differ materially from intended "Phase 2 warmup" behavior and affect stability
+  and reproducibility versus the reported fixed pipeline.
+
+- **Evidence**:
+  - Transition metadata/log only: `src/training/trainer.py:344-353`
+  - No use of `phase2_start_step` / `phase2_warmup_steps` in LR computation thereafter.
+  - Single scheduler initialized once in `Trainer.__init__`: `src/training/trainer.py:82-92`
+  - Scheduler implementation has one warmup window only: `src/training/scheduler.py:21-83`
+
+- **Reproducer**:
+  ```bash
+  rg -n "phase2_start_step|phase2_warmup_steps|warmup_steps|get_scheduler|scheduler.step" src/training/trainer.py src/training/scheduler.py
+  ```
+
+- **Deferral note (FIX_SESSION_06)**:
+  - No code-path warmup fix applied in this session by design.
+  - Added explicit config note near Phase 2 settings in `configs/base.yaml`.
+  - Conservative `lr_encoders` set to `2.0e-6` to reduce transition shock until proper Phase 2 warmup is implemented.
+
+---
 ### ISSUE-021 · InfoNCE valid_mask is image-only in active training path
 
 - **Discovered in**: CHECK_09
@@ -586,4 +665,5 @@
 -->
 
 _(empty â€” will be populated by audit checks)_
+
 

@@ -17,6 +17,50 @@ Before logging a fix here, the corresponding ISSUE must have:
 
 ## Fix Entries (newest at top)
 
+### FIX-SESSION_06 · ISSUE-023 Option B + lr_encoders adjustment · 2026-05-20
+
+- **Resolves**: ISSUE-023
+- **Defers**: ISSUE-022 (documented only, no scheduler code change)
+- **Component**: training + config
+- **Files changed**:
+  - `src/training/trainer.py` (remove trainer-level dropout call site in `train_epoch`)
+  - `configs/base.yaml` (set `lr_encoders: 2.0e-6` + ISSUE-022 documentation note)
+
+- **Change summary**:
+  Removed trainer-level modality dropout execution so model-level `ModalityDropout` is the sole active dropout path. This eliminates accidental text dropout in training and removes dropout compounding. Also adjusted Phase 2 encoder LR conservatively to `2.0e-6` and documented missing standalone Phase 2 warmup behavior.
+
+- **Diff snippet** (key changes only):
+  ```python
+  # src/training/trainer.py (train loop)
+  # Removed:
+  batch = self.apply_modality_dropout(batch)
+  # Kept:
+  # model.forward() still applies model-level self.modality_dropout(i_proj, m_proj)
+  ```
+  ```yaml
+  # configs/base.yaml
+  lr_encoders: 2.0e-6
+  # NOTE (ISSUE-022...): separate Phase 2 warmup not implemented in active LR behavior
+  ```
+
+- **Risks accepted**:
+  - Trainer-level raw augmentation is removed; regularization now relies on model-level dropout only.
+  - Lower `lr_encoders` may slow Phase 2 adaptation, accepted as a stability tradeoff while Phase 2 warmup is deferred.
+
+- **Verification**:
+  - `rg -n "apply_modality_dropout\\(" src/training/trainer.py src -g "*.py"` -> definition only, no call sites
+  - AST static check confirms zero `self.apply_modality_dropout(...)` call nodes
+  - `python -c "import yaml; ..."` confirms `lr_encoders in config: 2e-06` and in safe range
+  - `python -c "from src.training import trainer; from src.models.full_model import MultimodalMisinfoDetector"` imports OK
+
+- **Commits**:
+  - `d8a6ad4` — `fix(ISSUE-023 B): remove trainer-level apply_modality_dropout call from train loop`
+  - `0cea923` — `config(lr_encoders): adjust Phase 2 encoder LR to 2.0e-6`
+
+- **Rollback plan**:
+  - `git revert d8a6ad4`
+  - `git revert 0cea923`
+
 ### FIX-SESSION_05 · ISSUE-021 Options B + D · 2026-05-19
 
 - **Resolves**: ISSUE-021
@@ -61,6 +105,7 @@ Before logging a fix here, the corresponding ISSUE must have:
 - **Rollback plan**:
   - `git revert c944daa`
   - `git revert b0f7119`
+  
 ### FIX-SESSION_04 Â· Restore fusion stabilization trio (ISSUE-020) Â· 2026-05-19
 
 - **Resolves**: ISSUE-020
@@ -239,4 +284,3 @@ _(empty â€” will be populated as fixes are applied)_
 | FIX-SESSION_04 | 2026-05-19 | model / fusion | HIGH | intended fusion-dynamics change on retrain |
 | FIX-SESSION_02 | 2026-05-19 | data + config/model cascade | CRITICAL + HIGH | checkpoint incompatibility, splits regen |
 | FIX-SESSION_01 | 2026-05-18 | data | HIGH | dup drop, split regen, text shift |
-
