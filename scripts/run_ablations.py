@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data.dataset import create_datasets
 from src.data.collate import collate_fn
-from src.data.preprocessing import compute_class_weights
+from src.data.preprocessing import compute_pos_weight
 from src.losses.combined_loss import CombinedLoss
 from src.models import build_model, expected_param_range
 from src.training.optim import build_optimizer_phase1
@@ -246,13 +246,25 @@ def run_single_ablation(
             tokenizer=tokenizer,
             image_transforms=image_transforms,
             metadata_cols=config.get("metadata_features", []),
-            offline_embeddings_dir=str(embeddings_dir) if embeddings_dir.exists() else None,
+            # FIXED FIX_SESSION_07: honor current config gate for offline embeddings.
+            # OLD: offline_embeddings_dir=str(embeddings_dir) if embeddings_dir.exists() else None
+            offline_embeddings_dir=(
+                str(embeddings_dir)
+                if config.get("data", {}).get("use_offline_embeddings", False)
+                and embeddings_dir.exists()
+                else None
+            ),
             ablation_mode=config.get("ablation_mode", "full"),
+            # FIXED FIX_SESSION_07: pass current text settings used by create_datasets.
+            text_cols=config.get("text", {}).get("columns"),
+            max_text_len=config.get("model", {}).get("max_text_len", 256),
         )
         
         # Create dataloaders
         batch_size = config["training"].get("batch_size", 32)
-        num_workers = config.get("num_workers", 2)
+        # FIXED FIX_SESSION_07: read DataLoader workers from active nested config.
+        # OLD: num_workers = config.get("num_workers", 2)
+        num_workers = config.get("data", {}).get("num_workers", 2)
         
         train_loader = DataLoader(
             train_dataset,
@@ -281,25 +293,52 @@ def run_single_ablation(
         model = build_model(config)
         verification = verify_model_construction(config, model)
         
+        # Build loss function (required by current Trainer API)
+        train_df = pd.read_csv(processed_dir / "splits" / "train.csv")
+        pos_weight = compute_pos_weight(train_df)
+        loss_fn = CombinedLoss(
+            class_weights=None,
+            pos_weight=pos_weight,
+            contrastive_lambda=config["loss"].get("contrastive_lambda", 0.1),
+            contrastive_temperature_init=config["loss"].get("contrastive_temperature_init", 0.07),
+            label_smoothing=config["loss"].get("label_smoothing", 0.0),
+            cls_loss_type=config["loss"].get("cls_loss_type", "bce"),
+            focal_alpha=config["loss"].get("focal_alpha", 0.5),
+            focal_gamma=config["loss"].get("focal_gamma", 2.0),
+            focal_gamma_pos=config["loss"].get("focal_gamma_pos", 1.0),
+            focal_gamma_neg=config["loss"].get("focal_gamma_neg", 4.0),
+            focal_clip=config["loss"].get("focal_clip", 0.05),
+            ablation_mode=config.get("ablation_mode", "full"),
+        )
+
         # Build trainer
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[DEVICE] Using device: {device}")
         
+        # FIXED FIX_SESSION_07: align Trainer(...) call with current signature.
+        # OLD:
+        # trainer = Trainer(model, config, train_loader, val_loader, device=device)
         trainer = Trainer(
-            model,
-            config,
-            train_loader,
-            val_loader,
+            config=config,
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            loss_fn=loss_fn,
             device=device,
+            experiment_name=f"ablation_{mode}",
         )
         
         # Run training
         print(f"[TRAIN] Starting training for {mode}...")
-        train_metrics = trainer.train()
+        # FIXED FIX_SESSION_07: current Trainer.train() returns None; read state from trainer.
+        # OLD: train_metrics = trainer.train()
+        trainer.train()
         
         # Final test evaluation
         print(f"[FINAL TEST] Loading best checkpoint and evaluating...")
-        test_metrics = trainer.evaluate(test_loader, split="test", load_best=True)
+        # FIXED FIX_SESSION_07: evaluate() no longer accepts load_best flag.
+        # OLD: test_metrics = trainer.evaluate(test_loader, split="test", load_best=True)
+        test_metrics = trainer.evaluate(test_loader, split="test")
         
         duration = time.time() - start_time
         
@@ -311,10 +350,15 @@ def run_single_ablation(
             "duration_seconds": duration,
             "duration_human": f"{duration / 60:.1f} min",
             "verification": verification,
-            "best_val_metrics": train_metrics.get("best_val", {}),
+            "best_val_metrics": {
+                "metric_name": config["training"].get("early_stopping_metric", "f1_macro"),
+                "value": float(trainer.best_metric),
+            },
             "test_metrics": test_metrics,
-            "best_epoch": train_metrics.get("best_epoch"),
-            "early_stopped": train_metrics.get("early_stopped", False),
+            "best_epoch": trainer.best_epoch,
+            "early_stopped": (
+                trainer.early_stopping.counter >= trainer.early_stopping.patience
+            ),
         }
         
         # Save results to ablation's output_dir
@@ -323,8 +367,10 @@ def run_single_ablation(
         with open(output_dir / "results.json", "w") as f:
             json.dump(result, f, indent=2, default=str)
         
+        test_f1 = test_metrics.get("f1_macro")
+        test_f1_str = f"{test_f1:.4f}" if isinstance(test_f1, (int, float)) else "N/A"
         print(f"\n[DONE] {mode} finished in {duration / 60:.1f} min. "
-              f"Test F1-macro = {test_metrics.get('f1_macro', 'N/A'):.4f}")
+              f"Test F1-macro = {test_f1_str}")
         
         return result
         
