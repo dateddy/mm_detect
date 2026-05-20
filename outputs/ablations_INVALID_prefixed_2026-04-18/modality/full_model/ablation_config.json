@@ -1,0 +1,9 @@
+{
+  "name": "full_model",
+  "description": "All modalities (proposed multimodal approach)",
+  "overrides": {
+    "use_text": true,
+    "use_image": true,
+    "use_metadata": true
+  }
+}

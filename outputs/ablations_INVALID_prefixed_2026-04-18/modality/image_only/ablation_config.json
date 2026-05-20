@@ -1,0 +1,9 @@
+{
+  "name": "image_only",
+  "description": "Only image modality (ViT)",
+  "overrides": {
+    "use_text": false,
+    "use_image": true,
+    "use_metadata": false
+  }
+}

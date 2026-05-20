@@ -1,0 +1,9 @@
+{
+  "name": "text_image",
+  "description": "Text + Image, no metadata",
+  "overrides": {
+    "use_text": true,
+    "use_image": true,
+    "use_metadata": false
+  }
+}
