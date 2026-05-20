@@ -92,11 +92,17 @@ class Trainer:
         )
 
         # Initialize mixed precision scaler if enabled
-        self.mixed_precision = config["training"].get("mixed_precision", False)
+        self.mixed_precision = config["training"].get(
+            "use_amp",
+            config["training"].get("mixed_precision", False),
+        )
         self.scaler = GradScaler() if self.mixed_precision else None
 
         # Initialize early stopping with config metric
-        early_stop_patience = config["training"].get("early_stopping_patience", 8)
+        early_stop_patience = config["training"].get(
+            "early_stopping_patience",
+            config["training"].get("patience", 8),
+        )
         early_stop_metric = config["training"].get("early_stopping_metric", "f1_macro")
         ema_alpha = config["training"].get("early_stopping_ema_alpha", 0.7)
         
@@ -270,29 +276,25 @@ class Trainer:
         
         # ===== STEP 1: Unfreeze encoder blocks in the model =====
         self.logger.info(f"Unfreezing top-{k} encoder blocks...")
-        self.model.unfreeze_encoders(k)
+        if hasattr(self.model, "unfreeze_encoders"):
+            self.model.unfreeze_encoders(k)
+        elif hasattr(self.model, "transition_to_phase2"):
+            self.model.transition_to_phase2(k)
         
         # ===== STEP 2: Collect newly trainable encoder parameters =====
-        # Text encoder: unfreeze top-k blocks of PhoBERT (HuggingFace model)
-        # Access: model.text_encoder.model.encoder.layer[-k:]
         text_unfrozen_params = []
-        if hasattr(self.model.text_encoder.model, "encoder"):
-            if hasattr(self.model.text_encoder.model.encoder, "layer"):
-                text_blocks = self.model.text_encoder.model.encoder.layer
-                for block in text_blocks[-k:]:
-                    for p in block.parameters():
-                        if p.requires_grad:
-                            text_unfrozen_params.append(p)
+        text_encoder = getattr(self.model, "text_encoder", None)
+        if text_encoder is not None:
+            for p in text_encoder.parameters():
+                if p.requires_grad:
+                    text_unfrozen_params.append(p)
         
-        # Image encoder: unfreeze top-k blocks of ViT (timm model)
-        # Access: model.image_encoder.model.blocks[-k:]
         image_unfrozen_params = []
-        if hasattr(self.model.image_encoder.model, "blocks"):
-            image_blocks = self.model.image_encoder.model.blocks
-            for block in image_blocks[-k:]:
-                for p in block.parameters():
-                    if p.requires_grad:
-                        image_unfrozen_params.append(p)
+        image_encoder = getattr(self.model, "image_encoder", None)
+        if image_encoder is not None:
+            for p in image_encoder.parameters():
+                if p.requires_grad:
+                    image_unfrozen_params.append(p)
         
         n_text = sum(p.numel() for p in text_unfrozen_params)
         n_image = sum(p.numel() for p in image_unfrozen_params)
@@ -387,7 +389,8 @@ class Trainer:
             batch = self._move_batch_to_device(batch)
             
             # === NEW: PROMPT 4 — Apply modality dropout ===
-            batch = self.apply_modality_dropout(batch)
+            # Trainer-level modality dropout removed (ISSUE-023 Option B).
+            # Model-level ModalityDropout is the single active mechanism.
             valid_mask = batch.get("valid_mask")
             if valid_mask is not None:
                 n_dropped_total += (~valid_mask).sum().item()
@@ -400,14 +403,14 @@ class Trainer:
                     loss_dict = self.criterion(
                         logits=output["logits"],
                         labels=batch["label"].to(self.device),
-                        text_emb=output["t_proj"],        # Can be None in unimodal modes
-                        image_emb=output["i_proj"],        # Can be None in unimodal modes
+                        text_emb=output.get("t_proj"),        # Can be None in unimodal modes
+                        image_emb=output.get("i_proj"),        # Can be None in unimodal modes
                         valid_mask=(
-                            output["image_valid"]
-                            if output["image_valid"] is not None
+                            output.get("image_valid")
+                            if output.get("image_valid") is not None
                             else batch.get("valid_mask")
                         ),
-                        is_multimodal=output["is_multimodal"],  # Flag for ablation mode
+                        is_multimodal=output.get("is_multimodal", False),  # Flag for ablation mode
                     )
                     loss = loss_dict["loss"]
 
@@ -419,20 +422,22 @@ class Trainer:
                 loss_dict = self.criterion(
                     logits=output["logits"],
                     labels=batch["label"].to(self.device),
-                    text_emb=output["t_proj"],        # Can be None in unimodal modes
-                    image_emb=output["i_proj"],        # Can be None in unimodal modes
+                    text_emb=output.get("t_proj"),        # Can be None in unimodal modes
+                    image_emb=output.get("i_proj"),        # Can be None in unimodal modes
                     valid_mask=(
-                        output["image_valid"]
-                        if output["image_valid"] is not None
+                        output.get("image_valid")
+                        if output.get("image_valid") is not None
                         else batch.get("valid_mask")
                     ),
-                    is_multimodal=output["is_multimodal"],  # Flag for ablation mode
+                    is_multimodal=output.get("is_multimodal", False),  # Flag for ablation mode
                 )
                 loss = loss_dict["loss"]
                 loss.backward()
 
             # Diagnostic logging: embedding norm and similarity (only for multimodal mode)
-            if output["is_multimodal"] and (epoch <= 5 or epoch % 5 == 0):
+            output_is_multimodal = output.get("is_multimodal", False)
+
+            if output_is_multimodal and (epoch <= 5 or epoch % 5 == 0):
                 with torch.no_grad():
                     t = output["t_proj"].float()
                     i = output["i_proj"].float()
@@ -469,15 +474,15 @@ class Trainer:
             # Accumulate losses
             total_loss += loss.item()
             total_cls_loss += loss_dict["cls_loss"].item()
-            if contrastive_active and output["is_multimodal"] and loss_dict["con_loss"] is not None:
+            if contrastive_active and output_is_multimodal and loss_dict["con_loss"] is not None:
                 total_con_loss += loss_dict["con_loss"].item()
-            if contrastive_active and output["is_multimodal"] and loss_dict.get("temperature") is not None:
+            if contrastive_active and output_is_multimodal and loss_dict.get("temperature") is not None:
                 total_temperature += loss_dict.get("temperature", torch.tensor(0.0)).item()
             num_batches += 1
 
             if (batch_idx + 1) % max(1, len(self.train_loader) // 5) == 0:
                 log_msg = f"[Epoch {epoch+1}] Batch {batch_idx+1}/{len(self.train_loader)} | Loss: {total_loss/num_batches:.6f}"
-                if contrastive_active and output["is_multimodal"] and num_batches > 0:
+                if contrastive_active and output_is_multimodal and num_batches > 0:
                     avg_temp = total_temperature / num_batches
                     log_msg += f" | tau={avg_temp:.4f}"
                 self.logger.info(log_msg)
@@ -563,6 +568,14 @@ class Trainer:
 
         # Convert logits to probabilities via sigmoid
         proba_np = 1.0 / (1.0 + np.exp(-logits_np))
+        proba_stats = {
+            "proba_min": float(proba_np.min()),
+            "proba_mean": float(proba_np.mean()),
+            "proba_max": float(proba_np.max()),
+            "proba_std": float(proba_np.std()),
+            "logit_mean": float(logits_np.mean()),
+            "logit_std": float(logits_np.std()),
+        }
 
         # Compute threshold-independent and threshold-tuned metrics.
         metrics_at_05 = compute_all_metrics(labels_np, proba_np, threshold=0.5)
@@ -579,6 +592,7 @@ class Trainer:
         metrics.update(per_class_metrics)
         metrics["pos_rate"] = float((proba_np >= best_threshold).mean())
         metrics["pos_rate_at_05"] = float((proba_np >= 0.5).mean())
+        metrics.update(proba_stats)
 
         self.logger.info(
             f"[{split.upper()}] Accuracy: {metrics['accuracy']:.4f} | "
@@ -587,7 +601,13 @@ class Trainer:
             f"ROC-AUC: {metrics['auc_roc']:.4f} | "
             f"Recall_Pos: {metrics.get('recall_pos', 0):.4f} | "
             f"Recall_Neg: {metrics.get('recall_neg', 0):.4f} | "
-            f"Miss_Rate: {metrics.get('miss_rate', 0):.4f}"
+            f"Miss_Rate: {metrics.get('miss_rate', 0):.4f} | "
+            f"Proba: min/mean/max/std="
+            f"{proba_stats['proba_min']:.4f}/"
+            f"{proba_stats['proba_mean']:.4f}/"
+            f"{proba_stats['proba_max']:.4f}/"
+            f"{proba_stats['proba_std']:.4f} | "
+            f"PosRate@0.5={metrics['pos_rate_at_05']:.3f}"
         )
 
         return metrics
@@ -759,12 +779,15 @@ class Trainer:
         self.logger.info(f"Loaded best checkpoint: {self.best_checkpoint_path}")
         self.logger.info(
             f"Best val {self.config['training'].get('early_stopping_metric', 'f1_macro')}: "
-            f"{self.best_metric:.4f} at epoch {self.early_stopping.best_epoch}"
+            f"{self.best_metric:.4f} at epoch {self.early_stopping.best_epoch + 1}"
         )
 
         self.logger.info("=" * 70)
         self.logger.info(f"Best checkpoint: {self.best_checkpoint_path}")
-        self.logger.info(f"Best val F1-macro: {self.best_metric:.4f}")
+        self.logger.info(
+            f"Best val {self.config['training'].get('early_stopping_metric', 'f1_macro')}: "
+            f"{self.best_metric:.4f}"
+        )
         self.logger.info("Training complete!")
         self.logger.info("=" * 70)
 
