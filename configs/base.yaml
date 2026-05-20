@@ -84,13 +84,19 @@ training:
   early_stopping_metric: auc_roc
   
   lr_fusion: 3.0e-4
-  lr_encoders: 3.0e-6
+  lr_encoders: 2.0e-6
   weight_decay: 0.01
   warmup_steps: 800
   lr_min: 1.0e-7
   
   freeze_encoder_epochs: 3
   unfreeze_top_k_blocks: 4
+  # NOTE (ISSUE-022, 2026-05-19 audit):
+  # Phase 2 LR warmup for newly-unfrozen encoder params was listed in Drift Log
+  # as a separate fix (2026-05-05) but is not implemented as active LR behavior
+  # (only logged as metadata). lr_encoders is kept sufficiently small (<=5e-6)
+  # to compensate for the missing warmup. Fresh AdamW state + max_norm=1.0 clip
+  # provides natural conservative start. Implement proper warmup before v2 training.
   
   modality_dropout: 0.15
   text_modality_dropout_p: 0.0
