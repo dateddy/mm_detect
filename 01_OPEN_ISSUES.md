@@ -24,6 +24,109 @@
 
 ## Active Issues
 
+### ISSUE-024 · Early stopping monitors AUC-ROC, not macro-F1 as stated in Project Intent
+
+- **Discovered in**: CHECK_12
+- **Severity**: MEDIUM
+- **Status**: OPEN
+- **Component**: training / config
+- **Description**:
+  Project Intent states "Early stop on val macro-F1" (immutable north star).
+  Active config: `training.early_stopping_metric: auc_roc`.
+  Code selects best checkpoint based on AUC-ROC improvement, not F1.
+- **Impact**:
+  Best checkpoint may differ from the one that optimized F1. Paper claim
+  "early stop on val macro-F1" is inaccurate if left unchanged.
+- **Options**:
+  A — Change config to `early_stopping_metric: macro_f1` (matches intent)
+  B — Accept AUC-ROC, update paper to say "early stop on val AUC-ROC"
+- **Decision needed**: before retrain
+
+### ISSUE-026 · scripts/run_ablations.py API drift from current Trainer/Evaluate interfaces
+
+- **Discovered in**: CHECK_14
+- **Severity**: HIGH
+- **Status**: RESOLVED
+- **Component**: ablation / training orchestration
+- **Description**:
+  `scripts/run_ablations.py` appears out-of-sync with current `Trainer` interfaces.
+  It constructs `Trainer` with positional args that do not match the current
+  `Trainer.__init__` signature and calls `trainer.evaluate(..., load_best=True)`,
+  while active `Trainer.evaluate` has no `load_best` parameter.
+
+- **Impact**:
+  Post-fix ablation reruns via this script are likely to fail or be unreliable,
+  blocking regeneration of paper-grade ablation results.
+
+- **Evidence**:
+  - Current trainer signature: `src/training/trainer.py:37-47`
+  - Current evaluate signature: `src/training/trainer.py:538`
+  - Drifted calls in ablation runner:
+    - `scripts/run_ablations.py:288-294`
+    - `scripts/run_ablations.py:302`
+
+- **Reproducer**:
+  ```bash
+  rg -n "Trainer\\(|evaluate\\(.*load_best" scripts/run_ablations.py src/training/trainer.py
+  ```
+
+- **Resolution (FIX_SESSION_07, 2026-05-20)**:
+  - Updated `scripts/run_ablations.py` call sites to current APIs:
+    - fixed `Trainer(...)` constructor usage to pass `config`, `model`, loaders, and `loss_fn`
+    - removed deprecated `load_best=True` from `trainer.evaluate(...)`
+    - removed reliance on `trainer.train()` return payload (current train returns `None`)
+    - aligned dataset/offline embedding and worker config access with active config schema
+  - Verification:
+    - `python -m py_compile scripts/run_ablations.py` passes
+    - AST parse/import trace passes
+    - `python scripts/run_ablations.py --help` runs successfully
+  - Commit:
+    - `e457296` — `fix(ISSUE-026): update run_ablations.py API to match current interfaces`
+
+---
+
+### ISSUE-025 · Existing modality ablation artifacts are pre-fix and invalid for final claims
+
+- **Discovered in**: CHECK_14
+- **Severity**: CRITICAL
+- **Status**: RESOLVED
+- **Component**: evaluation / ablation / paper validity
+- **Description**:
+  All files under `outputs/ablations/modality/*` are timestamped `2026-04-18`,
+  predating all critical fix sessions (`2026-05-18` onward). These artifacts were
+  produced before scaling/fusion/dropout repairs and cannot support final claims.
+
+- **Impact**:
+  Any paper table using these artifacts would be methodologically invalid relative
+  to the current fixed codebase.
+
+- **Evidence**:
+  - Per-directory earliest/latest timestamps: `2026-04-18 04:31:43`
+  - Fix commits begin `2026-05-19` (`13cb755`, `caf7a4b`, `bd5f4ab`, `9c27c8c`, ...)
+  - `outputs/ablations/modality/summary.csv` currently has empty metric fields
+
+- **Reproducer**:
+  ```bash
+  Get-ChildItem -Path outputs/ablations/modality -Recurse -File | Sort-Object LastWriteTime
+  git log --oneline --format="%ci %h %s" | Select-String -Pattern "fix\\(|FIX_SESSION"
+  ```
+
+- **Resolution (FIX_SESSION_07, 2026-05-20)**:
+  - Archived legacy outputs to:
+    - `outputs/ablations_INVALID_prefixed_2026-04-18/`
+  - Added archive guardrail note:
+    - `outputs/ablations_INVALID_prefixed_2026-04-18/README_INVALID.md`
+  - Recreated clean empty ablation output structure with `.gitkeep` and new run instructions:
+    - `outputs/ablations/README.md`
+  - Verification:
+    - archive README exists
+    - clean `outputs/ablations/` structure exists
+    - stale `.json/.csv/.pt` count in new ablations tree = `0`
+  - Commit:
+    - `ed8620a` — `audit(ISSUE-025): archive pre-fix ablation outputs, create clean structure`
+
+---
+
 ### ISSUE-023 · Trainer-level modality dropout still drops text and compounds with model dropout
 
 - **Discovered in**: CHECK_11
@@ -224,20 +327,27 @@
 ### ISSUE-018 Â· full_model ablation mode guard conflicts with unimodal branches/tests
 
 - **Discovered in**: CHECK_07
-- **Severity**: MEDIUM
+- **Severity**: LOW
 - **Status**: OPEN
 - **Component**: model / ablation / repro
 - **Description**:
   `MultimodalMisinfoDetector` validates `ablation_mode` against only `full*` modes (`src/models/full_model.py:66-73`), but `forward()` still includes `text_only/image_only/metadata_only` branches (`src/models/full_model.py:333-343`), and `scripts/test_ablation_mode.py` directly instantiates `MultimodalMisinfoDetector` with unimodal modes.
 
 - **Impact**:
-  Direct full-model unimodal ablation tests can fail with mode-validation errors or rely on stale/unreachable branches. This increases confusion about canonical ablation entry points (factory vs direct class).
+  Canonical factory ablations are not blocked, but stale/unreachable unimodal branches
+  in `full_model.py` and direct-instantiation tests remain confusing and can mislead
+  contributors about the supported entry path.
 
 - **Reproducer**:
   ```bash
   # read-only static evidence
   rg -n "valid_modes|text_only|image_only|metadata_only" src/models/full_model.py scripts/test_ablation_mode.py
   ```
+
+- **C14 update**:
+  Factory-based unimodal instantiation passed for `text_only`, `image_only`,
+  and `metadata_only` (dedicated model classes). This issue remains a cleanup/
+  clarity concern rather than a runtime blocker.
 
 ---
 

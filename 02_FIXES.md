@@ -17,6 +17,60 @@ Before logging a fix here, the corresponding ISSUE must have:
 
 ## Fix Entries (newest at top)
 
+### FIX-SESSION_07 · ISSUE-025 archive + ISSUE-026 API repair · 2026-05-20
+
+- **Resolves**: ISSUE-025, ISSUE-026
+- **Component**: ablation artifacts + ablation runner
+- **Files changed**:
+  - `outputs/ablations_INVALID_prefixed_2026-04-18/` (archived legacy outputs + invalidity README)
+  - `outputs/ablations/` (clean post-fix structure + `.gitkeep` + README)
+  - `scripts/run_ablations.py` (Trainer/evaluate/config API drift fixes)
+
+- **Change summary**:
+  Part A archived all pre-fix modality ablation artifacts (dated 2026-04-18) and rebuilt an empty ablation output tree for post-retrain regeneration.  
+  Part B updated `run_ablations.py` to match the current training interfaces (Trainer constructor, evaluate signature, and train-return behavior) plus aligned dataset/config call arguments.
+
+- **Diff snippet** (key changes only):
+  ```python
+  # scripts/run_ablations.py
+  # OLD
+  trainer = Trainer(model, config, train_loader, val_loader, device=device)
+  test_metrics = trainer.evaluate(test_loader, split="test", load_best=True)
+  train_metrics = trainer.train()
+
+  # NEW
+  trainer = Trainer(config=config, model=model, train_loader=train_loader, val_loader=val_loader,
+                    loss_fn=loss_fn, device=device, experiment_name=f"ablation_{mode}")
+  trainer.train()
+  test_metrics = trainer.evaluate(test_loader, split="test")
+  ```
+  ```text
+  outputs/ablations/* (2026-04-18 artifacts) -> outputs/ablations_INVALID_prefixed_2026-04-18/
+  outputs/ablations/ recreated as clean, empty structure for post-retrain runs.
+  ```
+
+- **Risks accepted**:
+  - Archived artifact paths changed; any external references to old `outputs/ablations/*` files must be updated.
+  - Live ablation training execution still deferred; this session validates API compatibility and structure only.
+
+- **Verification**:
+  - Archive checks:
+    - `README_INVALID.md` present in archived path
+    - clean `outputs/ablations/README.md` present
+    - stale result file count in new tree = `0`
+  - Runner checks:
+    - `python -m py_compile scripts/run_ablations.py` passes
+    - AST parse/import trace passes
+    - `python scripts/run_ablations.py --help` passes
+
+- **Commits**:
+  - `ed8620a` — `audit(ISSUE-025): archive pre-fix ablation outputs, create clean structure`
+  - `e457296` — `fix(ISSUE-026): update run_ablations.py API to match current interfaces`
+
+- **Rollback plan**:
+  - `git revert e457296`
+  - `git revert ed8620a`
+
 ### FIX-SESSION_06 · ISSUE-023 Option B + lr_encoders adjustment · 2026-05-20
 
 - **Resolves**: ISSUE-023
@@ -280,6 +334,7 @@ _(empty â€” will be populated as fixes are applied)_
 
 | Fix # | Date | Component | Severity resolved | Risks accepted |
 |---|---|---|---|---|
+| FIX-SESSION_07 | 2026-05-20 | ablation artifacts + runner API | CRITICAL + HIGH | archive path migration, live ablation execution deferred |
 | FIX-SESSION_05 | 2026-05-19 | losses + model/config | HIGH | fewer InfoNCE pairs, reduced text-dropout regularization |
 | FIX-SESSION_04 | 2026-05-19 | model / fusion | HIGH | intended fusion-dynamics change on retrain |
 | FIX-SESSION_02 | 2026-05-19 | data + config/model cascade | CRITICAL + HIGH | checkpoint incompatibility, splits regen |
