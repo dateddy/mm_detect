@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data.dataset import create_datasets
 from src.data.collate import collate_fn
-from src.data.preprocessing import compute_class_weights
+from src.data.preprocessing import compute_class_weights, compute_pos_weight
 from src.losses.combined_loss import CombinedLoss
 from src.models import build_model, expected_param_range
 from src.training.optim import build_optimizer_phase1
@@ -214,8 +214,22 @@ def run_single_ablation(
         if not images_dir.is_absolute():
             images_dir = project_root / images_dir
         
-        # Initialize tokenizer and transforms
-        tokenizer = AutoTokenizer.from_pretrained(config["model"]["text_model_name"])
+        # Initialize tokenizer only for modes that actually load text. Use cache
+        # only to avoid network failures in offline training environments.
+        uses_text = config.get("ablation_mode", "full") in {
+            "full", "full_no_contrastive", "full_no_modality_dropout",
+            "full_no_dropout", "full_no_metadata_in_fusion",
+            "full_no_attention", "full_no_gating",
+            "text_only", "text_image", "text_metadata",
+        }
+        tokenizer = (
+            AutoTokenizer.from_pretrained(
+                config["model"]["text_model_name"],
+                local_files_only=True,
+            )
+            if uses_text
+            else None
+        )
         image_size = config["model"].get("image_size", 224)
         
         image_transforms = {
@@ -246,13 +260,21 @@ def run_single_ablation(
             tokenizer=tokenizer,
             image_transforms=image_transforms,
             metadata_cols=config.get("metadata_features", []),
-            offline_embeddings_dir=str(embeddings_dir) if embeddings_dir.exists() else None,
+            offline_embeddings_dir=(
+                str(embeddings_dir)
+                if config.get("data", {}).get("use_offline_embeddings", False)
+                and embeddings_dir.exists()
+                else None
+            ),
             ablation_mode=config.get("ablation_mode", "full"),
+            text_cols=config.get("text", {}).get("columns"),
+            max_text_len=config.get("model", {}).get("max_text_len", 256),
         )
         
         # Create dataloaders
         batch_size = config["training"].get("batch_size", 32)
-        num_workers = config.get("num_workers", 2)
+        num_workers = config.get("data", {}).get("num_workers", 2)
+        pin_memory = config.get("data", {}).get("pin_memory", False) and torch.cuda.is_available()
         
         train_loader = DataLoader(
             train_dataset,
@@ -260,6 +282,7 @@ def run_single_ablation(
             shuffle=True,
             collate_fn=collate_fn,
             num_workers=num_workers,
+            pin_memory=pin_memory,
         )
         val_loader = DataLoader(
             val_dataset,
@@ -267,6 +290,7 @@ def run_single_ablation(
             shuffle=False,
             collate_fn=collate_fn,
             num_workers=num_workers,
+            pin_memory=pin_memory,
         )
         test_loader = DataLoader(
             test_dataset,
@@ -274,32 +298,57 @@ def run_single_ablation(
             shuffle=False,
             collate_fn=collate_fn,
             num_workers=num_workers,
+            pin_memory=pin_memory,
         )
+
+        train_df = pd.read_csv(processed_dir / "splits" / "train.csv")
+        pos_weight = compute_pos_weight(train_df)
+        actual_pos_rate = float(train_df["misinformation"].mean())
+        config.setdefault("data", {})["estimated_pos_rate"] = actual_pos_rate
         
         # Build model via factory
         print(f"[MODEL] Building model for {mode}...")
         model = build_model(config)
         verification = verify_model_construction(config, model)
+
+        loss_fn = CombinedLoss(
+            class_weights=None,
+            pos_weight=pos_weight,
+            contrastive_lambda=config["loss"].get("contrastive_lambda", 0.1),
+            contrastive_temperature_init=config["loss"].get("contrastive_temperature_init", 0.07),
+            label_smoothing=config["loss"].get("label_smoothing", 0.0),
+            cls_loss_type=config["loss"].get("cls_loss_type", "bce"),
+            focal_alpha=config["loss"].get("focal_alpha", 0.5),
+            focal_gamma=config["loss"].get("focal_gamma", 2.0),
+            focal_gamma_pos=config["loss"].get("focal_gamma_pos", 1.0),
+            focal_gamma_neg=config["loss"].get("focal_gamma_neg", 4.0),
+            focal_clip=config["loss"].get("focal_clip", 0.05),
+            ablation_mode=config.get("ablation_mode", "full"),
+            aux_lambda=config["loss"].get("aux_lambda", 0.1),
+        )
         
         # Build trainer
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[DEVICE] Using device: {device}")
         
         trainer = Trainer(
-            model,
-            config,
-            train_loader,
-            val_loader,
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            loss_fn=loss_fn,
+            config=config,
             device=device,
+            experiment_name=mode,
+            logger_obj=logger,
         )
         
         # Run training
         print(f"[TRAIN] Starting training for {mode}...")
-        train_metrics = trainer.train()
+        trainer.train()
         
         # Final test evaluation
         print(f"[FINAL TEST] Loading best checkpoint and evaluating...")
-        test_metrics = trainer.evaluate(test_loader, split="test", load_best=True)
+        test_metrics = trainer.evaluate(test_loader, split="test")
         
         duration = time.time() - start_time
         
@@ -311,10 +360,13 @@ def run_single_ablation(
             "duration_seconds": duration,
             "duration_human": f"{duration / 60:.1f} min",
             "verification": verification,
-            "best_val_metrics": train_metrics.get("best_val", {}),
+            "best_val_metrics": {
+                "best_metric": trainer.best_metric,
+                "best_checkpoint": str(trainer.best_checkpoint_path),
+            },
             "test_metrics": test_metrics,
-            "best_epoch": train_metrics.get("best_epoch"),
-            "early_stopped": train_metrics.get("early_stopped", False),
+            "best_epoch": trainer.best_epoch,
+            "early_stopped": False,
         }
         
         # Save results to ablation's output_dir

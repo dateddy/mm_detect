@@ -161,8 +161,14 @@ def load_config_with_inheritance(config_path: str) -> Dict[str, Any]:
     Returns:
         Merged configuration dictionary
     """
-    config_path = Path(config_path)
-    project_root = config_path.parent.parent if config_path.parent.name != "configs" else config_path.parent.parent.parent
+    config_path = Path(config_path).resolve()
+    project_root = None
+    for candidate in (config_path.parent, *config_path.parents):
+        if (candidate / "configs" / "base.yaml").exists():
+            project_root = candidate
+            break
+    if project_root is None:
+        project_root = Path.cwd()
     
     # Load base config first
     base_config_path = project_root / "configs" / "base.yaml"

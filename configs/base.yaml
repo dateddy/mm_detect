@@ -27,7 +27,8 @@ data:
   train_split: 0.7
   val_split: 0.15
   test_split: 0.15
-  estimated_pos_rate: 0.61
+  use_offline_embeddings: false
+  estimated_pos_rate: 0.609
   split_seed: 42
   split_strategy: page_level
   num_workers: 4
@@ -49,7 +50,12 @@ model:
   
   projection_dropout: 0.1
   attention_dropout: 0.1
+  use_selective_attention: true
+  attn_gate_init_logit: -2.0
+  sample_gate_hidden: 64
+  sample_gate_init_bias: -1.0
   classifier_dropout: 0.3
+  aux_dropout: 0.2
   
   metadata_input_dim: 17
 
@@ -105,7 +111,7 @@ loss:
   cls_loss_type: bce
   
   # BCE-specific
-  label_smoothing: 0.05
+  label_smoothing: 0.0
   
   # Focal-specific
   focal_alpha: 0.5
@@ -116,6 +122,7 @@ loss:
   # Contrastive
   contrastive_lambda: 0.1
   contrastive_temperature_init: 0.07
+  aux_lambda: 0.1
 
 # ========================================
 # Text processing

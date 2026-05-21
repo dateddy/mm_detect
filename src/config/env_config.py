@@ -24,11 +24,11 @@ class EnvConfig:
 
         self.env_file = Path(env_file)
 
-        # Load environment variables from .env file
+        # Load environment variables from .env file when present. Most training
+        # and ablation scripts use YAML configs only, so missing .env should not
+        # make importing src.config.schema fail.
         if self.env_file.exists():
             load_dotenv(self.env_file)
-        else:
-            raise FileNotFoundError(f".env file not found at {self.env_file}")
 
     # ========== Data Paths ==========
 

@@ -160,7 +160,15 @@ def print_classification_report(
     print("\n" + "=" * 70)
     print("Classification Report")
     print("=" * 70)
-    print(classification_report(y_true, y_pred, target_names=label_names, digits=4))
+    print(
+        classification_report(
+            y_true,
+            y_pred,
+            target_names=label_names,
+            digits=4,
+            zero_division=0,
+        )
+    )
 
     print("\nConfusion Matrix")
     print("-" * 70)

@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from typing import Dict, Optional, Tuple
 
+from .classification_head import initialize_classifier_prior_bias
 from .fusion.cross_attention import BidirectionalCrossAttention
 from .fusion.gating import GatingFusion
 from .fusion.projection import ModalityProjection, ModalityDropout
@@ -135,7 +136,8 @@ class ClassificationHead(nn.Module):
         self,
         input_dim: int = 256,
         hidden_dim: int = 128,
-        dropout: float = 0.3
+        dropout: float = 0.3,
+        prior_pos_rate: float = 0.609,
     ):
         """
         Initialize classification head.
@@ -144,6 +146,7 @@ class ClassificationHead(nn.Module):
             input_dim: Input dimension (256)
             hidden_dim: First hidden layer dimension (128)
             dropout: Dropout rate (0.3)
+            prior_pos_rate: Positive class prior for final bias initialization.
         """
         super().__init__()
         
@@ -155,6 +158,10 @@ class ClassificationHead(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1)  # Output logit
+        )
+        initialize_classifier_prior_bias(
+            self.head,
+            {"data": {"estimated_pos_rate": prior_pos_rate}},
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -192,7 +199,8 @@ class MultimodalModel(nn.Module):
         num_heads: int = 8,
         attention_dropout: float = 0.1,
         modality_dropout_rate: float = 0.15,
-        head_dropout: float = 0.3
+        head_dropout: float = 0.3,
+        prior_pos_rate: float = 0.609,
     ):
         """
         Initialize multimodal model.
@@ -203,6 +211,7 @@ class MultimodalModel(nn.Module):
             attention_dropout: Dropout in attention (0.1)
             modality_dropout_rate: Modality dropout rate (0.15)
             head_dropout: Classification head dropout (0.3)
+            prior_pos_rate: Positive class prior for final bias initialization.
         """
         super().__init__()
         
@@ -218,7 +227,8 @@ class MultimodalModel(nn.Module):
         self.classifier = ClassificationHead(
             input_dim=hidden_dim,
             hidden_dim=128,
-            dropout=head_dropout
+            dropout=head_dropout,
+            prior_pos_rate=prior_pos_rate,
         )
     
     def forward(
