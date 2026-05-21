@@ -1,0 +1,9 @@
+{
+  "name": "metadata_only",
+  "description": "Only metadata modality (9 behavioral features)",
+  "overrides": {
+    "use_text": false,
+    "use_image": false,
+    "use_metadata": true
+  }
+}

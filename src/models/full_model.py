@@ -90,6 +90,12 @@ class MultimodalMisinfoDetector(nn.Module):
         modality_dropout_p = cfg_training.get(
             "modality_dropout", config.get("modality_dropout_p", 0.15)
         )
+        text_modality_dropout_p = cfg_training.get(
+            "text_modality_dropout_p", config.get("text_modality_dropout_p", 0.0)
+        )
+        image_modality_dropout_p = cfg_training.get(
+            "image_modality_dropout_p", modality_dropout_p
+        )
         head_dropout = cfg_model.get("classifier_dropout", config.get("head_dropout", 0.3))
 
         if self.ablation_mode == "full_no_dropout":
@@ -100,6 +106,8 @@ class MultimodalMisinfoDetector(nn.Module):
             proj_dropout = 0.0
             attn_dropout = 0.0
             head_dropout = 0.0
+            text_modality_dropout_p = 0.0
+            image_modality_dropout_p = 0.0
         
         # Store proj_dim for later use
         self.proj_dim = proj_dim
@@ -146,8 +154,11 @@ class MultimodalMisinfoDetector(nn.Module):
             dropout=proj_dropout,
         )
 
-        # Modality dropout
-        self.modality_dropout = ModalityDropout(p=modality_dropout_p)
+        # Modality dropout (ISSUE-021 Option D):
+        # Keep text dropout disabled while preserving image/metadata dropout.
+        self.text_modality_dropout_p = text_modality_dropout_p
+        self.image_modality_dropout_p = image_modality_dropout_p
+        self.modality_dropout = ModalityDropout(p=image_modality_dropout_p)
 
         # Dual cross-attention, removed entirely for the no-attention ablation.
         if self.ablation_mode == "full_no_attention":
@@ -224,6 +235,10 @@ class MultimodalMisinfoDetector(nn.Module):
 
         logger.info(
             f"Initialized MultimodalMisinfoDetector with {self.count_parameters()} total parameters"
+        )
+        logger.info(
+            f"Modality dropout config: text={self.text_modality_dropout_p:.3f}, "
+            f"image/meta={self.image_modality_dropout_p:.3f}"
         )
 
     def forward(self, batch: Dict) -> Dict:
@@ -329,9 +344,9 @@ class MultimodalMisinfoDetector(nn.Module):
         if self.ablation_mode == "full_no_modality_dropout":
             t_valid = i_valid = m_valid = None
         else:
-            (t_proj, i_proj, m_proj), (t_valid, i_valid, m_valid) = self.modality_dropout(
-                t_proj, i_proj, m_proj
-            )
+            # Text dropout intentionally disabled (ISSUE-021 Option D).
+            t_valid = torch.ones(t_proj.shape[0], dtype=torch.bool, device=t_proj.device)
+            (i_proj, m_proj), (i_valid, m_valid) = self.modality_dropout(i_proj, m_proj)
 
         # Contrastive loss needs both text and image to be present. Missing
         # images are already encoded in i_valid by ModalityDropout because the

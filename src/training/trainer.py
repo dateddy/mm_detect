@@ -502,7 +502,8 @@ class Trainer:
             batch = self._move_batch_to_device(batch)
             
             # === NEW: PROMPT 4 — Apply modality dropout ===
-            batch = self.apply_modality_dropout(batch)
+            # Trainer-level modality dropout removed (ISSUE-023 Option B).
+            # Model-level ModalityDropout is the single active mechanism.
             valid_mask = batch.get("valid_mask")
             if valid_mask is not None:
                 n_dropped_total += (~valid_mask).sum().item()
@@ -523,7 +524,10 @@ class Trainer:
                             else batch.get("valid_mask")
                         ),
                         is_multimodal=output.get("is_multimodal", False),  # Flag for ablation mode
+<<<<<<< HEAD
                         output_dict=output,
+=======
+>>>>>>> audit/fix-session-07
                     )
                     loss = loss_dict["loss"]
 
@@ -543,7 +547,10 @@ class Trainer:
                         else batch.get("valid_mask")
                     ),
                     is_multimodal=output.get("is_multimodal", False),  # Flag for ablation mode
+<<<<<<< HEAD
                     output_dict=output,
+=======
+>>>>>>> audit/fix-session-07
                 )
                 loss = loss_dict["loss"]
                 loss.backward()
@@ -590,9 +597,12 @@ class Trainer:
             total_cls_loss += loss_dict["cls_loss"].item()
             if contrastive_active and output_is_multimodal and loss_dict["con_loss"] is not None:
                 total_con_loss += loss_dict["con_loss"].item()
+<<<<<<< HEAD
             total_aux_text_loss += loss_dict.get("aux_text", torch.tensor(0.0)).item()
             total_aux_image_loss += loss_dict.get("aux_image", torch.tensor(0.0)).item()
             total_aux_meta_loss += loss_dict.get("aux_meta", torch.tensor(0.0)).item()
+=======
+>>>>>>> audit/fix-session-07
             if contrastive_active and output_is_multimodal and loss_dict.get("temperature") is not None:
                 total_temperature += loss_dict.get("temperature", torch.tensor(0.0)).item()
             num_batches += 1

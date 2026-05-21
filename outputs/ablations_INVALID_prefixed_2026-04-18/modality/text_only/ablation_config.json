@@ -1,0 +1,9 @@
+{
+  "name": "text_only",
+  "description": "Only text modality (PhoBERT)",
+  "overrides": {
+    "use_text": true,
+    "use_image": false,
+    "use_metadata": false
+  }
+}

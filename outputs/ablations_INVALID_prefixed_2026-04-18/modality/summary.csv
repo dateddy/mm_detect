@@ -1,0 +1,8 @@
+ablation,description,accuracy,precision,recall,f1_macro,auc_roc
+text_only,Only text modality (PhoBERT),,,,,
+image_only,Only image modality (ViT),,,,,
+metadata_only,Only metadata modality (9 behavioral features),,,,,
+text_image,"Text + Image, no metadata",,,,,
+text_metadata,"Text + Metadata, no image",,,,,
+image_metadata,"Image + Metadata, no text",,,,,
+full_model,All modalities (proposed multimodal approach),,,,,

@@ -41,7 +41,6 @@ def create_synthetic_metadata(n_samples: int = 1000, seed: int = 42) -> pd.DataF
         # Binary features (0 or 1)
         "FB_only_flag": np.random.binomial(1, 0.3, n_samples),
         "all_targeted": np.random.binomial(1, 0.5, n_samples),
-        "language_location_mismatch": np.random.binomial(1, 0.2, n_samples),
         
         # Ratio features (0 to 1)
         "repeated_text_ratio": np.random.uniform(0, 1, n_samples),
@@ -85,7 +84,7 @@ def test_binary_features_unchanged():
     train_scaled = scaler.transform(train_df)
     test_scaled = scaler.transform(test_df)
     
-    binary_cols = ["FB_only_flag", "all_targeted", "language_location_mismatch"]
+    binary_cols = ["FB_only_flag", "all_targeted"]
     
     for col in binary_cols:
         idx = list(train_df.columns).index(col)
