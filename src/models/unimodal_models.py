@@ -75,10 +75,13 @@ class TextOnlyModel(nn.Module):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for text-only model."""
         # === Text path only ===
-        text_repr = self.text_encoder(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-        )
+        if "text_emb" in batch:
+            text_repr = batch["text_emb"]
+        else:
+            text_repr = self.text_encoder(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+            )
         
         t_proj = self.text_proj(text_repr)  # [B, 256]
         
@@ -100,6 +103,10 @@ class TextOnlyModel(nn.Module):
                 p.requires_grad = True
                 params.append(p)
         return params
+
+    def unfreeze_encoders(self, top_k: int) -> None:
+        """Trainer-compatible encoder unfreeze hook."""
+        self.text_encoder.unfreeze_top_k(top_k)
     
     def count_parameters(self, trainable_only: bool = False) -> int:
         """Count total or trainable parameters."""
@@ -171,7 +178,10 @@ class ImageOnlyModel(nn.Module):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for image-only model."""
         # timm ViT returns features directly when num_classes=0
-        image_repr = self.image_encoder(batch["pixel_values"])  # [B, 768]
+        if "image_emb" in batch:
+            image_repr = batch["image_emb"]
+        else:
+            image_repr = self.image_encoder(batch["pixel_values"])  # [B, 768]
         
         i_proj = self.image_proj(image_repr)  # [B, 256]
         logits = self.classifier(i_proj)
@@ -190,6 +200,11 @@ class ImageOnlyModel(nn.Module):
                 p.requires_grad = True
                 params.append(p)
         return params
+
+    def unfreeze_encoders(self, top_k: int) -> None:
+        """Trainer-compatible encoder unfreeze hook."""
+        for p in self.transition_to_phase2(top_k):
+            p.requires_grad = True
     
     def count_parameters(self, trainable_only: bool = False) -> int:
         """Count total or trainable parameters."""
@@ -269,6 +284,10 @@ class MetadataOnlyModel(nn.Module):
     def transition_to_phase2(self, k: int = 4):
         """No-op for metadata-only (no encoders to unfreeze)."""
         return []
+
+    def unfreeze_encoders(self, top_k: int) -> None:
+        """No-op for metadata-only (no encoders to unfreeze)."""
+        return None
     
     def count_parameters(self, trainable_only: bool = False) -> int:
         """Count total or trainable parameters."""

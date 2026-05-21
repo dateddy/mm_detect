@@ -115,14 +115,20 @@ class TextImageModel(_BimodalBase):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for text+image model."""
         # Text encoding
-        text_repr = self.text_encoder(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-        )
+        if "text_emb" in batch:
+            text_repr = batch["text_emb"]
+        else:
+            text_repr = self.text_encoder(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+            )
         t_proj = self.text_proj(text_repr)
         
         # Image encoding
-        image_repr = self.image_encoder(batch["pixel_values"])
+        if "image_emb" in batch:
+            image_repr = batch["image_emb"]
+        else:
+            image_repr = self.image_encoder(batch["pixel_values"])
         i_proj = self.image_proj(image_repr)
         
         # Concat fusion
@@ -157,6 +163,12 @@ class TextImageModel(_BimodalBase):
                 params.append(p)
         
         return params
+
+    def unfreeze_encoders(self, top_k: int) -> None:
+        """Trainer-compatible encoder unfreeze hook."""
+        self.text_encoder.unfreeze_top_k(top_k)
+        for p in self.transition_to_phase2(top_k):
+            p.requires_grad = True
     
     def count_parameters(self, trainable_only: bool = False) -> int:
         """Count total or trainable parameters."""
@@ -237,10 +249,13 @@ class TextMetadataModel(_BimodalBase):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for text+metadata model."""
         # Text encoding
-        text_repr = self.text_encoder(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-        )
+        if "text_emb" in batch:
+            text_repr = batch["text_emb"]
+        else:
+            text_repr = self.text_encoder(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+            )
         t_proj = self.text_proj(text_repr)
         
         # Metadata encoding
@@ -272,6 +287,10 @@ class TextMetadataModel(_BimodalBase):
                 params.append(p)
         
         return params
+
+    def unfreeze_encoders(self, top_k: int) -> None:
+        """Trainer-compatible encoder unfreeze hook."""
+        self.text_encoder.unfreeze_top_k(top_k)
     
     def count_parameters(self, trainable_only: bool = False) -> int:
         """Count total or trainable parameters."""
@@ -357,7 +376,10 @@ class ImageMetadataModel(_BimodalBase):
     def forward(self, batch: Dict) -> Dict:
         """Forward pass for image+metadata model."""
         # Image encoding
-        image_repr = self.image_encoder(batch["pixel_values"])
+        if "image_emb" in batch:
+            image_repr = batch["image_emb"]
+        else:
+            image_repr = self.image_encoder(batch["pixel_values"])
         i_proj = self.image_proj(image_repr)
         
         # Metadata encoding
@@ -388,6 +410,11 @@ class ImageMetadataModel(_BimodalBase):
                 params.append(p)
         
         return params
+
+    def unfreeze_encoders(self, top_k: int) -> None:
+        """Trainer-compatible encoder unfreeze hook."""
+        for p in self.transition_to_phase2(top_k):
+            p.requires_grad = True
     
     def count_parameters(self, trainable_only: bool = False) -> int:
         """Count total or trainable parameters."""

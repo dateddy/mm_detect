@@ -47,6 +47,8 @@ class AdDataset(Dataset):
         split: str,
         offline_embeddings_dir: Optional[str] = None,
         ablation_mode: str = "full",
+        text_cols: Optional[List[str]] = None,
+        max_text_len: int = 256,
     ):
         """
         Initialize AdDataset.
@@ -60,6 +62,7 @@ class AdDataset(Dataset):
             split: Dataset split identifier ('train', 'val', 'test').
             offline_embeddings_dir: Optional directory containing pre-extracted embeddings.
             ablation_mode: Model ablation mode. Used to skip loading unused modalities (memory savings).
+            text_cols: Text columns to concatenate for online tokenization.
         """
         self.df = df.reset_index(drop=True)
         self.images_dir = Path(images_dir)
@@ -67,6 +70,8 @@ class AdDataset(Dataset):
         self.image_transform = image_transform
         self.metadata_cols = metadata_cols
         self.split = split
+        self.text_cols = text_cols or ["ad_creative_bodies", "ad_creative_link_titles"]
+        self.max_text_len = max_text_len
         self.use_offline_embeddings = False
         self.text_embeddings = None
         self.image_embeddings = None
@@ -169,6 +174,24 @@ class AdDataset(Dataset):
                     self.image_embeddings = None
                     return
 
+                if self.load_text and float(np.mean(np.std(self.text_embeddings, axis=0))) < 1e-6:
+                    logger.warning(
+                        f"Text embeddings in {text_emb_path} are effectively constant across rows. "
+                        "Ignoring cached embeddings and using online tokenization."
+                    )
+                    self.text_embeddings = None
+                    self.image_embeddings = None
+                    return
+
+                if self.load_image and float(np.mean(np.std(self.image_embeddings, axis=0))) < 1e-6:
+                    logger.warning(
+                        f"Image embeddings in {image_emb_path} are effectively constant across rows. "
+                        "Ignoring cached embeddings and using online image encoding."
+                    )
+                    self.text_embeddings = None
+                    self.image_embeddings = None
+                    return
+
                 self.use_offline_embeddings = True
                 logger.info(
                     f"Loaded offline embeddings from {text_emb_path.name}, {image_emb_path.name}: "
@@ -244,10 +267,15 @@ class AdDataset(Dataset):
             
             if self.load_text:
                 # Get text
-                text = str(row.get("ad_creative_body", ""))
+                text_parts = []
+                for col in self.text_cols:
+                    value = row.get(col, "")
+                    if pd.notna(value):
+                        text_parts.append(str(value))
+                text = " ".join(part for part in text_parts if part.strip())
                 encoding = self.tokenizer(
                     text,
-                    max_length=256,
+                    max_length=self.max_text_len,
                     truncation=True,
                     padding="max_length",
                     return_tensors="pt",
@@ -360,6 +388,8 @@ def create_datasets(
     metadata_cols: List[str],
     offline_embeddings_dir: Optional[str] = None,
     ablation_mode: str = "full",
+    text_cols: Optional[List[str]] = None,
+    max_text_len: int = 256,
 ) -> tuple:
     """
     Create train, val, and test AdDataset instances.
@@ -373,6 +403,7 @@ def create_datasets(
         image_transforms: Dict mapping split names to image transforms.
         metadata_cols: List of metadata feature column names.
         offline_embeddings_dir: Optional directory with pre-extracted embeddings.
+        text_cols: Text columns to concatenate for online tokenization.
 
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset).
@@ -391,6 +422,8 @@ def create_datasets(
         split="train",
         offline_embeddings_dir=offline_embeddings_dir,
         ablation_mode=ablation_mode,
+        text_cols=text_cols,
+        max_text_len=max_text_len,
     )
 
     val_dataset = AdDataset(
@@ -402,6 +435,8 @@ def create_datasets(
         split="val",
         offline_embeddings_dir=offline_embeddings_dir,
         ablation_mode=ablation_mode,
+        text_cols=text_cols,
+        max_text_len=max_text_len,
     )
 
     test_dataset = AdDataset(
@@ -413,6 +448,8 @@ def create_datasets(
         split="test",
         offline_embeddings_dir=offline_embeddings_dir,
         ablation_mode=ablation_mode,
+        text_cols=text_cols,
+        max_text_len=max_text_len,
     )
 
     return train_dataset, val_dataset, test_dataset
