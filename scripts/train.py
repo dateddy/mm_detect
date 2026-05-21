@@ -241,8 +241,15 @@ def main():
         tokenizer=tokenizer,
         image_transforms=image_transforms,
         metadata_cols=config.get("metadata_features", []),
-        offline_embeddings_dir=str(embeddings_dir) if embeddings_dir.exists() else None,
+        offline_embeddings_dir=(
+            str(embeddings_dir)
+            if config.get("data", {}).get("use_offline_embeddings", False)
+            and embeddings_dir.exists()
+            else None
+        ),
         ablation_mode=config.get("ablation_mode", "full"),
+        text_cols=config.get("text", {}).get("columns"),
+        max_text_len=config.get("model", {}).get("max_text_len", 256),
     )
 
     logger.info(f"Dataset sizes: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}")
@@ -253,16 +260,20 @@ def main():
     train_df = pd.read_csv(train_csv_path)
     class_weights_list = compute_class_weights(train_df)
     pos_weight = compute_pos_weight(train_df)
+    actual_pos_rate = float(train_df["misinformation"].mean())
+    config.setdefault("data", {})["estimated_pos_rate"] = actual_pos_rate
     # Keep class_weights on CPU initially for loss function initialization
     class_weights = class_weights_list
     logger.info(f"Class weights: {class_weights.numpy()}")
     logger.info(f"BCE pos_weight (n_neg/n_pos): {pos_weight:.4f}")
+    logger.info(f"Classifier prior initialized from train pos_rate: {actual_pos_rate:.4f}")
 
     # ========== 9. Create dataloaders ==========
     from src.data.collate import collate_fn
 
     batch_size = config["training"].get("batch_size", 32)
-    num_workers = config.get("num_workers", 2)
+    num_workers = config.get("data", {}).get("num_workers", 2)
+    pin_memory = config.get("data", {}).get("pin_memory", False) and device.type == "cuda"
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -270,6 +281,7 @@ def main():
         shuffle=True,
         collate_fn=collate_fn,
         num_workers=num_workers,
+        pin_memory=pin_memory,
     )
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
@@ -277,6 +289,7 @@ def main():
         shuffle=False,
         collate_fn=collate_fn,
         num_workers=num_workers,
+        pin_memory=pin_memory,
     )
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
@@ -284,6 +297,7 @@ def main():
         shuffle=False,
         collate_fn=collate_fn,
         num_workers=num_workers,
+        pin_memory=pin_memory,
     )
 
     # ========== 10. DRY RUN: limit batches ==========
@@ -378,7 +392,7 @@ def main():
     logger.info("=" * 80)
     logger.info(f"Loading best checkpoint: {trainer.best_checkpoint_path}")
     logger.info(f"Best val metric:         {trainer.best_metric:.4f} "
-                f"(epoch {trainer.best_epoch})")
+                f"(epoch {trainer.best_epoch + 1})")
 
     # Load best checkpoint into model (trainer already did this, but ensure consistency)
     from src.utils.checkpoint import load_checkpoint
@@ -455,6 +469,12 @@ def main():
 
     test_labels = np.array(test_labels)
     test_preds = np.array(test_preds)
+    logger.info(
+        "Test probability stats: "
+        f"min={test_preds.min():.4f}, mean={test_preds.mean():.4f}, "
+        f"max={test_preds.max():.4f}, std={test_preds.std():.4f}, "
+        f"pos_rate@0.5={(test_preds >= 0.5).mean():.3f}"
+    )
 
     # Compute test metrics using best threshold from validation
     test_metrics = compute_all_metrics(test_labels, test_preds, best_threshold)
@@ -498,7 +518,7 @@ def main():
     logger.info(f"Experiment: {experiment_name}")
     logger.info(f"Results dir: {results_dir}")
     logger.info(f"Best checkpoint: {trainer.best_checkpoint_path}")
-    logger.info(f"Best epoch: {trainer.best_epoch}")
+    logger.info(f"Best epoch: {trainer.best_epoch + 1}")
     logger.info(f"Best val metric: {trainer.best_metric:.4f}")
     logger.info(f"Test F1 (macro): {test_metrics['f1_macro']:.4f}")
     logger.info(f"Test AUC-ROC: {test_metrics['auc_roc']:.4f}")
