@@ -64,7 +64,6 @@ class DualBidirectionalCrossAttention(nn.Module):
         self.attn_text_to_image = self.text_attn
         self.attn_image_to_text = self.image_attn
 
-<<<<<<< HEAD
         self.text_gate_logits = nn.Parameter(torch.full((embed_dim,), gate_init_logit))
         self.image_gate_logits = nn.Parameter(torch.full((embed_dim,), gate_init_logit))
 
@@ -93,26 +92,6 @@ class DualBidirectionalCrossAttention(nn.Module):
     def image_gate(self) -> torch.Tensor:
         """Effective image gate values after sigmoid."""
         return torch.sigmoid(self.image_gate_logits)
-=======
-        # --- RESTORATION: stabilization trio (FIX_SESSION_04, ISSUE-020) ---
-        # 1. LayerNorm for per-arm strong residuals
-        self.norm_text = nn.LayerNorm(embed_dim)
-        self.norm_image = nn.LayerNorm(embed_dim)
-
-        # 2. Learnable per-dimension gates (sigmoid(-2.0) ≈ 0.12 at init)
-        self.gate_text = nn.Parameter(torch.full((embed_dim,), -2.0))
-        self.gate_image = nn.Parameter(torch.full((embed_dim,), -2.0))
-
-        # 3. Output projection x0.1 init for near-identity start
-        self.attn_text_to_image.out_proj.weight.data *= 0.1
-        self.attn_image_to_text.out_proj.weight.data *= 0.1
-        # --- END RESTORATION ---
-
-        logger.info(
-            f"Initialized DualCrossAttention "
-            f"(embed_dim={embed_dim}, num_heads={num_heads}, dropout={dropout})"
-        )
->>>>>>> audit/fix-session-07
 
     def forward(
         self,
@@ -132,7 +111,6 @@ class DualBidirectionalCrossAttention(nn.Module):
             text_enriched and image_enriched. If return_attention_weights is True,
             also returns a dict containing attention weights.
         """
-<<<<<<< HEAD
         t_q = t_proj.unsqueeze(1)
         i_q = i_proj.unsqueeze(1)
 
@@ -207,39 +185,6 @@ class DualBidirectionalCrossAttention(nn.Module):
             f"embed_dim={self.embed_dim}, num_heads={self.num_heads}, "
             f"use_residual={self.use_residual}"
         )
-=======
-        # Branch A: Text → Text + Image + Metadata
-        #   Query: Text (B, 1, 256)
-        #   Key/Value: [Text, Image, Metadata] (B, 3, 256)
-        q_text = t_proj.unsqueeze(1)  # (B, 1, 256)
-        if m_proj is None:
-            kv_all = i_proj.unsqueeze(1)  # (B, 1, 256)
-        else:
-            kv_all = torch.stack([t_proj, i_proj, m_proj], dim=1)  # (B, 3, 256)
-
-        t_attn, _ = self.attn_text_to_image(
-            q_text, kv_all, kv_all
-        )
-        t_attn = t_attn.squeeze(1)  # (B, 256)
-        t_gated = torch.sigmoid(self.gate_text) * t_attn
-        t_prime = self.norm_text(t_proj + t_gated)
-
-        # Branch B: Image → Text + Image + Metadata
-        #   Query: Image (B, 1, 256)
-        #   Key/Value: [Text, Image, Metadata] (B, 3, 256)
-        q_image = i_proj.unsqueeze(1)  # (B, 1, 256)
-        if m_proj is None:
-            kv_all = t_proj.unsqueeze(1)  # (B, 1, 256)
-        else:
-            kv_all = torch.stack([t_proj, i_proj, m_proj], dim=1)  # (B, 3, 256)
-
-        i_attn, _ = self.attn_image_to_text(
-            q_image, kv_all, kv_all
-        )
-        i_attn = i_attn.squeeze(1)  # (B, 256)
-        i_gated = torch.sigmoid(self.gate_image) * i_attn
-        i_prime = self.norm_image(i_proj + i_gated)
->>>>>>> audit/fix-session-07
 
 
 class SelectiveCrossAttention(nn.Module):

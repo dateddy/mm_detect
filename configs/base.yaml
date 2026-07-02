@@ -129,7 +129,9 @@ loss:
   # Contrastive
   contrastive_lambda: 0.1
   contrastive_temperature_init: 0.07
-  aux_lambda: 0.1
+  # FIX_SESSION_08: aux heads disabled by default (aux_lambda=0). output_dict is
+  # still passed to CombinedLoss (InfoNCE embedding extraction), only aux is off.
+  aux_lambda: 0.0
 
 # ========================================
 # Text processing

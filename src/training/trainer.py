@@ -68,7 +68,7 @@ class Trainer:
         self.experiment_name = experiment_name
         self.logger = logger_obj or logger
 
-        # === NEW: PROMPT 4 — Detect model modalities and adapt modality dropout ===
+        # === NEW: PROMPT 4 â€” Detect model modalities and adapt modality dropout ===
         self._detect_modalities()
         
         # Initialize optimizer with Phase 1 setup (encoders frozen)
@@ -303,7 +303,7 @@ class Trainer:
             Modified batch with modality dropout applied and 'valid_mask' added
         """
         if self.modality_dropout <= 0:
-            # No dropout — all samples are valid
+            # No dropout â€” all samples are valid
             B = batch["label"].shape[0]
             device = batch["label"].device
             batch["valid_mask"] = torch.ones(B, dtype=torch.bool, device=device)
@@ -447,8 +447,8 @@ class Trainer:
         # On the next optimizer.step(), they will be initialized:
         #   m_t = 0 (first moment)
         #   v_t = 0 (second moment)
-        # This is the CORRECT standard behavior — we do NOT manually initialize their state.
-        # DO NOT copy state from other params — that would corrupt the optimization.
+        # This is the CORRECT standard behavior â€” we do NOT manually initialize their state.
+        # DO NOT copy state from other params â€” that would corrupt the optimization.
         
         # ===== STEP 6: Record phase transition metadata =====
         self.phase2_start_step = self.global_step
@@ -501,7 +501,7 @@ class Trainer:
             # Move batch to device
             batch = self._move_batch_to_device(batch)
             
-            # === NEW: PROMPT 4 — Apply modality dropout ===
+            # === NEW: PROMPT 4 â€” Apply modality dropout ===
             # Trainer-level modality dropout removed (ISSUE-023 Option B).
             # Model-level ModalityDropout is the single active mechanism.
             valid_mask = batch.get("valid_mask")
@@ -524,10 +524,7 @@ class Trainer:
                             else batch.get("valid_mask")
                         ),
                         is_multimodal=output.get("is_multimodal", False),  # Flag for ablation mode
-<<<<<<< HEAD
                         output_dict=output,
-=======
->>>>>>> audit/fix-session-07
                     )
                     loss = loss_dict["loss"]
 
@@ -547,10 +544,7 @@ class Trainer:
                         else batch.get("valid_mask")
                     ),
                     is_multimodal=output.get("is_multimodal", False),  # Flag for ablation mode
-<<<<<<< HEAD
                     output_dict=output,
-=======
->>>>>>> audit/fix-session-07
                 )
                 loss = loss_dict["loss"]
                 loss.backward()
@@ -597,12 +591,9 @@ class Trainer:
             total_cls_loss += loss_dict["cls_loss"].item()
             if contrastive_active and output_is_multimodal and loss_dict["con_loss"] is not None:
                 total_con_loss += loss_dict["con_loss"].item()
-<<<<<<< HEAD
             total_aux_text_loss += loss_dict.get("aux_text", torch.tensor(0.0)).item()
             total_aux_image_loss += loss_dict.get("aux_image", torch.tensor(0.0)).item()
             total_aux_meta_loss += loss_dict.get("aux_meta", torch.tensor(0.0)).item()
-=======
->>>>>>> audit/fix-session-07
             if contrastive_active and output_is_multimodal and loss_dict.get("temperature") is not None:
                 total_temperature += loss_dict.get("temperature", torch.tensor(0.0)).item()
             num_batches += 1
@@ -799,14 +790,14 @@ class Trainer:
         - Class 1 (Positive/Misinformation): the target of interest
 
         Metrics:
-        - precision_pos: TP / (TP + FP) — how many predicted positives are correct
-        - recall_pos: TP / (TP + FN) — how many true positives we catch
+        - precision_pos: TP / (TP + FP) â€” how many predicted positives are correct
+        - recall_pos: TP / (TP + FN) â€” how many true positives we catch
         - f1_pos: Harmonic mean of precision and recall for positive class
-        - precision_neg: TN / (TN + FN) — how many predicted negatives are correct
-        - recall_neg: TN / (TN + FP) — how many true negatives we correctly identify
+        - precision_neg: TN / (TN + FN) â€” how many predicted negatives are correct
+        - recall_neg: TN / (TN + FP) â€” how many true negatives we correctly identify
         - f1_neg: Harmonic mean for negative class
-        - miss_rate: FN / (TP + FN) — rate of missed positives (operationally critical)
-        - false_alarm_rate: FP / (TN + FP) — rate of false positives
+        - miss_rate: FN / (TP + FN) â€” rate of missed positives (operationally critical)
+        - false_alarm_rate: FP / (TN + FP) â€” rate of false positives
         - confusion_matrix: [TN, FP; FN, TP]
 
         Args:

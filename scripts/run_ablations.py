@@ -39,11 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data.dataset import create_datasets
 from src.data.collate import collate_fn
-<<<<<<< HEAD
 from src.data.preprocessing import compute_class_weights, compute_pos_weight
-=======
-from src.data.preprocessing import compute_pos_weight
->>>>>>> audit/fix-session-07
 from src.losses.combined_loss import CombinedLoss
 from src.models import build_model, expected_param_range
 from src.training.optim import build_optimizer_phase1
@@ -264,11 +260,6 @@ def run_single_ablation(
             tokenizer=tokenizer,
             image_transforms=image_transforms,
             metadata_cols=config.get("metadata_features", []),
-<<<<<<< HEAD
-=======
-            # FIXED FIX_SESSION_07: honor current config gate for offline embeddings.
-            # OLD: offline_embeddings_dir=str(embeddings_dir) if embeddings_dir.exists() else None
->>>>>>> audit/fix-session-07
             offline_embeddings_dir=(
                 str(embeddings_dir)
                 if config.get("data", {}).get("use_offline_embeddings", False)
@@ -276,24 +267,14 @@ def run_single_ablation(
                 else None
             ),
             ablation_mode=config.get("ablation_mode", "full"),
-<<<<<<< HEAD
-=======
-            # FIXED FIX_SESSION_07: pass current text settings used by create_datasets.
->>>>>>> audit/fix-session-07
             text_cols=config.get("text", {}).get("columns"),
             max_text_len=config.get("model", {}).get("max_text_len", 256),
         )
         
         # Create dataloaders
         batch_size = config["training"].get("batch_size", 32)
-<<<<<<< HEAD
         num_workers = config.get("data", {}).get("num_workers", 2)
         pin_memory = config.get("data", {}).get("pin_memory", False) and torch.cuda.is_available()
-=======
-        # FIXED FIX_SESSION_07: read DataLoader workers from active nested config.
-        # OLD: num_workers = config.get("num_workers", 2)
-        num_workers = config.get("data", {}).get("num_workers", 2)
->>>>>>> audit/fix-session-07
         
         train_loader = DataLoader(
             train_dataset,
@@ -372,41 +353,22 @@ def run_single_ablation(
         # OLD:
         # trainer = Trainer(model, config, train_loader, val_loader, device=device)
         trainer = Trainer(
-<<<<<<< HEAD
-=======
-            config=config,
->>>>>>> audit/fix-session-07
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
             loss_fn=loss_fn,
-<<<<<<< HEAD
             config=config,
             device=device,
             experiment_name=mode,
             logger_obj=logger,
-=======
-            device=device,
-            experiment_name=f"ablation_{mode}",
->>>>>>> audit/fix-session-07
         )
         
         # Run training
         print(f"[TRAIN] Starting training for {mode}...")
-<<<<<<< HEAD
-=======
-        # FIXED FIX_SESSION_07: current Trainer.train() returns None; read state from trainer.
-        # OLD: train_metrics = trainer.train()
->>>>>>> audit/fix-session-07
         trainer.train()
         
         # Final test evaluation
         print(f"[FINAL TEST] Loading best checkpoint and evaluating...")
-<<<<<<< HEAD
-=======
-        # FIXED FIX_SESSION_07: evaluate() no longer accepts load_best flag.
-        # OLD: test_metrics = trainer.evaluate(test_loader, split="test", load_best=True)
->>>>>>> audit/fix-session-07
         test_metrics = trainer.evaluate(test_loader, split="test")
         
         duration = time.time() - start_time
@@ -420,23 +382,12 @@ def run_single_ablation(
             "duration_human": f"{duration / 60:.1f} min",
             "verification": verification,
             "best_val_metrics": {
-<<<<<<< HEAD
                 "best_metric": trainer.best_metric,
                 "best_checkpoint": str(trainer.best_checkpoint_path),
             },
             "test_metrics": test_metrics,
             "best_epoch": trainer.best_epoch,
             "early_stopped": False,
-=======
-                "metric_name": config["training"].get("early_stopping_metric", "f1_macro"),
-                "value": float(trainer.best_metric),
-            },
-            "test_metrics": test_metrics,
-            "best_epoch": trainer.best_epoch,
-            "early_stopped": (
-                trainer.early_stopping.counter >= trainer.early_stopping.patience
-            ),
->>>>>>> audit/fix-session-07
         }
         
         # Save results to ablation's output_dir

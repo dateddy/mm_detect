@@ -17,6 +17,70 @@ Before logging a fix here, the corresponding ISSUE must have:
 
 ## Fix Entries (newest at top)
 
+### FIX-SESSION_08 · Resolve broken merge 5359227 toward HEAD · 2026-07-02
+
+- **Resolves**: ISSUE-027, ISSUE-028, ISSUE-029, ISSUE-030, ISSUE-031
+- **Component**: merge conflict resolution (ablation runner + fusion + trainer) + loss config + repo hygiene
+- **Root cause**: merge commit `5359227` was committed with unresolved conflict markers
+  (`<<<<<<< / ======= / >>>>>>>`) in 3 files; the working tree was a half-finished, broken
+  hand-resolution (duplicate `config=`, deleted `evaluate()`, dropped `output_dict`).
+
+- **Files changed**:
+  - `scripts/run_ablations.py` — resolved toward HEAD (config= once; `trainer.evaluate(..., split="test")` restored; `pin_memory` kept)
+  - `src/models/cross_attention.py` — kept HEAD superset (`text_gate_logits/image_gate_logits`, `text_norm/image_norm`, `_initialize_attention_output`, `get_gate_stats`); ISSUE-020 trio preserved
+  - `src/training/trainer.py` — kept HEAD side: `output_dict=output` in BOTH loss calls + `total_aux_*` accumulation
+  - `configs/base.yaml` — `aux_lambda: 0.1 -> 0.0` (aux heads OFF by default; `output_dict` still passed for InfoNCE)
+  - `outputs/ablations/`, `outputs/ablations_INVALID_prefixed_2026-04-18/` — restored from HEAD (`git checkout`), avoids re-opening ISSUE-025
+  - `fix.py` — deleted (stray monkey-patch)
+  - `.git/hooks/pre-commit` — new: `git diff --cached --check` blocks staged conflict markers
+
+- **Decision**: resolve ALL conflicts **toward HEAD** (HEAD is a superset of the ISSUE-020
+  stabilization trio and carries valid current Trainer/evaluate API). Method: regenerate each
+  file from `git show HEAD:<file>` with a deterministic strip-toward-HEAD state machine (keep the
+  section between `<<<<<<< HEAD` and `=======`, drop markers + audit side).
+
+- **Known divergence (transparency)**: toward-HEAD reverts the run_ablations Trainer call cosmetics
+  documented in FIX-SESSION_07 (`experiment_name=f"ablation_{mode}"` -> `experiment_name=mode`, adds
+  `logger_obj=logger`). Both forms match the current `Trainer.__init__` signature (verified
+  `trainer.py:37-46`), so ISSUE-026's API correctness is NOT reopened — only checkpoint-dir naming differs.
+
+- **Diff snippet** (key changes only):
+  ```python
+  # scripts/run_ablations.py — config= now appears ONCE, evaluate restored
+  trainer = Trainer(model=model, train_loader=train_loader, val_loader=val_loader,
+                    loss_fn=loss_fn, config=config, device=device,
+                    experiment_name=mode, logger_obj=logger)
+  trainer.train()
+  test_metrics = trainer.evaluate(test_loader, split="test")
+
+  # src/training/trainer.py — both loss calls keep:
+  loss_dict = self.criterion(..., is_multimodal=..., output_dict=output)
+
+  # configs/base.yaml
+  aux_lambda: 0.0   # was 0.1
+  ```
+
+- **Risks accepted**:
+  - **REGRESSION (accept)**: toward-HEAD drops audit-side run_ablations cosmetics; verified both API
+    forms valid → checkpoint dir named by `mode` not `ablation_{mode}`. Low impact.
+  - **VALIDITY (accept)**: `aux_lambda=0` disables auxiliary heads by default; contrastive/InfoNCE
+    path preserved via retained `output_dict`. Intended per decision.
+  - **REPRODUCIBILITY (mitigate)**: conflict-marker recurrence blocked by new pre-commit hook.
+  - **FIX-FORWARD ONLY**: main + audit/fix-session-07 already pushed → no rebase/amend/force-push.
+
+- **Verification** (gate — BOTH required, passed):
+  - a) `python -m py_compile` on all 3 files → clean; `grep '^(<<<<<<<|=======|>>>>>>>)'` → none.
+  - b) runtime smoke (`smoke_fix_session_08.py`, synthetic 1-batch CPU, offline encoders):
+    - forward loss finite (`0.8607`); `t_proj(4,256)` + `i_proj(4,256)` present; `is_multimodal=True`
+    - `aux_total == 0.0` at `aux_lambda=0` (path exists, disabled — not None)
+    - `Trainer.evaluate(loader, split="test")` returns full metrics dict (`f1_macro`, `accuracy`, `auc_roc`, ...)
+
+- **Commits**:
+  - (this session) `fix(FIX_SESSION_08): resolve broken merge 5359227 toward HEAD ...`
+
+- **Rollback plan**:
+  - `git revert <FIX_SESSION_08 commit>`  (fix-forward; do NOT rewrite pushed history)
+
 ### FIX-SESSION_07 · ISSUE-025 archive + ISSUE-026 API repair · 2026-05-20
 
 - **Resolves**: ISSUE-025, ISSUE-026

@@ -777,3 +777,103 @@
 _(empty â€” will be populated by audit checks)_
 
 
+
+### ISSUE-027 · Merge 5359227 committed with unresolved conflict markers in 3 source files
+
+- **Discovered in**: FIX_SESSION_08
+- **Severity**: CRITICAL
+- **Status**: RESOLVED
+- **Component**: repo/merge
+- **Description**:
+  HEAD:scripts/run_ablations.py, src/models/cross_attention.py, src/training/trainer.py contain literal <<<<<<< HEAD / ======= / >>>>>>> audit/fix-session-07; committed code does not parse
+- **Impact**:
+  Any checkout of 5359227 fails to import all 3 files; branch is dead on arrival
+- **Reproducer**:
+  ```bash
+  for f in scripts/run_ablations.py src/models/cross_attention.py src/training/trainer.py; do git show HEAD:$f>/tmp/c.py; python -m py_compile /tmp/c.py; done  # all FAIL
+  ```
+- **Hypothesized cause**:
+  merge conflicts staged+committed without resolution; no conflict-marker guard
+
+<!-- emitted 2026-07-02 -->
+
+---
+
+### ISSUE-028 · Botched working-tree resolution produced duplicate config= kwarg (SyntaxError)
+
+- **Discovered in**: FIX_SESSION_08
+- **Severity**: CRITICAL
+- **Status**: RESOLVED
+- **Component**: scripts/run_ablations
+- **Description**:
+  scripts/run_ablations.py Trainer(...) call had config=config twice (kept from both conflict sides)
+- **Impact**:
+  SyntaxError: keyword argument repeated: config -> run_ablations un-runnable
+- **Reproducer**:
+  ```bash
+  python -m py_compile scripts/run_ablations.py  # before fix: SyntaxError line ~365
+  ```
+- **Linked to**: ISSUE-027
+
+<!-- emitted 2026-07-02 -->
+
+---
+
+### ISSUE-029 · Test-set evaluate() call deleted during botched resolution
+
+- **Discovered in**: FIX_SESSION_08
+- **Severity**: HIGH
+- **Status**: RESOLVED
+- **Component**: scripts/run_ablations
+- **Description**:
+  scripts/run_ablations.py: active line 'test_metrics = trainer.evaluate(test_loader, split="test")' removed, only '# OLD:' comment left
+- **Impact**:
+  Ablations would compute no test metrics; Phase-4 results empty/invalid
+- **Reproducer**:
+  ```bash
+  grep -nE 'trainer\.evaluate\(' scripts/run_ablations.py  # before fix: 0 live calls
+  ```
+- **Linked to**: ISSUE-027
+
+<!-- emitted 2026-07-02 -->
+
+---
+
+### ISSUE-030 · output_dict=output dropped in both loss calls -> aux + InfoNCE silently broken
+
+- **Discovered in**: FIX_SESSION_08
+- **Severity**: HIGH
+- **Status**: RESOLVED
+- **Component**: src/training/trainer
+- **Description**:
+  src/training/trainer.py:~524 & ~543 lost output_dict=output; CombinedLoss.forward (combined_loss.py:345,372,420) needs it for embedding extraction + aux gate
+- **Impact**:
+  aux_* losses hard-zero and InfoNCE embeddings fall back to defaults; no crash, silent training-signal loss
+- **Reproducer**:
+  ```bash
+  grep -nE 'output_dict=output' src/training/trainer.py  # before fix: 0 hits; after: 2
+  ```
+- **Linked to**: ISSUE-027
+
+<!-- emitted 2026-07-02 -->
+
+---
+
+### ISSUE-031 · Stray one-off monkey-patch fix.py at repo root
+
+- **Discovered in**: FIX_SESSION_08
+- **Severity**: LOW
+- **Status**: RESOLVED
+- **Component**: repo/root
+- **Description**:
+  fix.py: ad-hoc script rewriting run_ablations.py DataLoader call; unrelated to conflicts, clutter
+- **Impact**:
+  Encourages patch-without-risk-control pattern the audit route forbids
+- **Reproducer**:
+  ```bash
+  test -f fix.py && echo present  # before fix: present
+  ```
+
+<!-- emitted 2026-07-02 -->
+
+---
